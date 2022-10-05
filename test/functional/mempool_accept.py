@@ -28,7 +28,10 @@ from test_framework.script import (
     OP_RETURN,
 )
 from test_framework.script_util import (
+    INVALID_SPK_LEN,
     keys_to_multisig_script,
+    NONSTANDARD_OP_RETURN_SCRIPT,
+    NONSTANDARD_TX_NONWITNESS_SIZE,
     script_to_p2sh_script,
 )
 from test_framework.util import (
@@ -333,6 +336,40 @@ class MempoolAcceptanceTest(BitcoinTestFramework):
             maxfeerate=0,
         )
 
+        # Prep for tiny-tx tests with MiniWallet anyone-can-spend output
+        seed_utxo = self.wallet.send_self_transfer(from_node=node)["new_utxo"]
+        self.generate(node, 1)
+
+        self.log.info('A tiny transaction(in non-witness bytes) that is disallowed')
+        tx = self.wallet.create_self_transfer(utxo_to_spend=seed_utxo)["tx"]
+        tx.vout[0].scriptPubKey = NONSTANDARD_OP_RETURN_SCRIPT
+        # Note it's only non-witness size that matters!
+        assert_equal(len(tx.serialize_without_witness()), NONSTANDARD_TX_NONWITNESS_SIZE)
+        assert len(tx.serialize()) != NONSTANDARD_TX_NONWITNESS_SIZE
+
+        self.check_mempool_result(
+            result_expected=[{'txid': tx.rehash(), 'allowed': False, 'reject-reason': 'tx-bad-nonwit-size'}],
+            rawtxs=[tx.serialize().hex()],
+            maxfeerate=0,
+        )
+
+        self.log.info('Just-below size transaction(in non-witness bytes) that is allowed')
+        tx.vout[0] = CTxOut(int(seed_utxo["value"] * COIN) - 1000, CScript([OP_RETURN] + ([OP_0] * (INVALID_SPK_LEN - 2))))
+        assert_equal(len(tx.serialize_without_witness()), NONSTANDARD_TX_NONWITNESS_SIZE - 1)
+        self.check_mempool_result(
+            result_expected=[{'txid': tx.rehash(), 'allowed': True, 'vsize': tx.get_vsize(), 'fees': { 'base': Decimal('0.00001000')}}],
+            rawtxs=[tx.serialize().hex()],
+            maxfeerate=0,
+        )
+
+        self.log.info('Just-above size transaction(in non-witness bytes) that is allowed')
+        tx.vout[0] = CTxOut(int(seed_utxo["value"] * COIN) - 1000, CScript([OP_RETURN] + ([OP_0] * (INVALID_SPK_LEN))))
+        assert_equal(len(tx.serialize_without_witness()), NONSTANDARD_TX_NONWITNESS_SIZE + 1)
+        self.check_mempool_result(
+            result_expected=[{'txid': tx.rehash(), 'allowed': True, 'vsize': tx.get_vsize(), 'fees': { 'base': Decimal('0.00001000')}}],
+            rawtxs=[tx.serialize().hex()],
+            maxfeerate=0,
+        )
 
 if __name__ == '__main__':
     MempoolAcceptanceTest().main()

@@ -13,12 +13,13 @@ from test_framework.script import (
     OP_EQUAL,
     OP_EQUALVERIFY,
     OP_HASH160,
+    OP_RETURN,
     hash160,
     sha256,
 )
 
-# To prevent a "tx-size-small" policy rule error, a transaction has to have a
-# non-witness size of at least 82 bytes (MIN_STANDARD_TX_NONWITNESS_SIZE in
+# To prevent a "tx-bad-nonwit-size" policy rule error, a transaction may not have a
+# non-witness size of 64 bytes (NONSTANDARD_TX_NONWITNESS_SIZE in
 # src/policy/policy.h). Considering a Tx with the smallest possible single
 # input (blank, empty scriptSig), and with an output omitting the scriptPubKey,
 # we get to a minimum size of 60 bytes:
@@ -27,16 +28,15 @@ from test_framework.script import (
 # Blank Input: 32 [PrevTxHash] + 4 [Index] + 1 [scriptSigLen] + 4 [SeqNo] = 41 bytes
 # Output:      8 [Amount] + 1 [scriptPubKeyLen] = 9 bytes
 #
-# Hence, the scriptPubKey of the single output has to have a size of at
-# least 22 bytes, which corresponds to the size of a P2WPKH scriptPubKey.
-# The following script constant consists of a single push of 21 bytes of 'a':
-#   <PUSH_21> <21-bytes of 'a'>
-# resulting in a 22-byte size. It should be used whenever (small) fake
-# scriptPubKeys are needed, to guarantee that the minimum transaction size is
-# met.
-DUMMY_P2WPKH_SCRIPT = CScript([b'a' * 21])
-DUMMY_2_P2WPKH_SCRIPT = CScript([b'b' * 21])
+# Hence, the scriptPubKey of the single output MUST NOT have a size of 4.
+NONSTANDARD_TX_NONWITNESS_SIZE = 64
+INVALID_SPK_LEN = NONSTANDARD_TX_NONWITNESS_SIZE - 10 - 41 - 9
+assert INVALID_SPK_LEN == 4
 
+# This script cannot be spent, allowing dust output values under
+# standardness checks
+NONSTANDARD_OP_RETURN_SCRIPT = CScript([OP_RETURN] + ([OP_0] * (INVALID_SPK_LEN - 1)))
+assert len(NONSTANDARD_OP_RETURN_SCRIPT) == INVALID_SPK_LEN
 
 def key_to_p2pk_script(key):
     key = check_key(key)
