@@ -35,40 +35,40 @@ struct LogCategory {
 };
 
 namespace BCLog {
-    enum LogFlags : uint32_t {
+    enum LogFlags : uint64_t {
         NONE        = 0,
-        NET         = (1 <<  0),
-        TOR         = (1 <<  1),
-        MEMPOOL     = (1 <<  2),
-        HTTP        = (1 <<  3),
-        BENCH       = (1 <<  4),
-        ZMQ         = (1 <<  5),
-        WALLETDB    = (1 <<  6),
-        RPC         = (1 <<  7),
-        ESTIMATEFEE = (1 <<  8),
-        ADDRMAN     = (1 <<  9),
-        SELECTCOINS = (1 << 10),
-        REINDEX     = (1 << 11),
-        CMPCTBLOCK  = (1 << 12),
-        RAND        = (1 << 13),
-        PRUNE       = (1 << 14),
-        PROXY       = (1 << 15),
-        MEMPOOLREJ  = (1 << 16),
-        LIBEVENT    = (1 << 17),
-        COINDB      = (1 << 18),
-        QT          = (1 << 19),
-        LEVELDB     = (1 << 20),
-        VALIDATION  = (1 << 21),
-        I2P         = (1 << 22),
-        IPC         = (1 << 23),
+        NET         = (1ULL <<  0),
+        TOR         = (1ULL <<  1),
+        MEMPOOL     = (1ULL <<  2),
+        HTTP        = (1ULL <<  3),
+        BENCH       = (1ULL <<  4),
+        ZMQ         = (1ULL <<  5),
+        WALLETDB    = (1ULL <<  6),
+        RPC         = (1ULL <<  7),
+        ESTIMATEFEE = (1ULL <<  8),
+        ADDRMAN     = (1ULL <<  9),
+        SELECTCOINS = (1ULL << 10),
+        REINDEX     = (1ULL << 11),
+        CMPCTBLOCK  = (1ULL << 12),
+        RAND        = (1ULL << 13),
+        PRUNE       = (1ULL << 14),
+        PROXY       = (1ULL << 15),
+        MEMPOOLREJ  = (1ULL << 16),
+        LIBEVENT    = (1ULL << 17),
+        COINDB      = (1ULL << 18),
+        QT          = (1ULL << 19),
+        LEVELDB     = (1ULL << 20),
+        VALIDATION  = (1ULL << 21),
+        I2P         = (1ULL << 22),
+        IPC         = (1ULL << 23),
 #ifdef DEBUG_LOCKCONTENTION
-        LOCK        = (1 << 24),
+        LOCK        = (1ULL << 24),
 #endif
-        UTIL        = (1 << 25),
-        BLOCKSTORE  = (1 << 26),
-        TXRECONCILIATION = (1 << 27),
-        SCAN        = (1 << 28),
-        ALL         = ~(uint32_t)0,
+        UTIL        = (1ULL << 25),
+        BLOCKSTORE  = (1ULL << 26),
+        TXRECONCILIATION = (1ULL << 27),
+        SCAN        = (1ULL << 28),
+        ALL         = ~(uint64_t)0,
     };
     enum class Level {
         Trace = 0, // High-volume or detailed logging for development/debugging
@@ -104,7 +104,7 @@ namespace BCLog {
         std::atomic<Level> m_log_level{DEFAULT_LOG_LEVEL};
 
         /** Log categories bitfield. */
-        std::atomic<uint32_t> m_categories{0};
+        std::atomic<uint64_t> m_categories{0};
 
         std::string LogTimestampStr(const std::string& str);
 
@@ -171,7 +171,7 @@ namespace BCLog {
         void SetLogLevel(Level level) { m_log_level = level; }
         bool SetLogLevel(const std::string& level);
 
-        uint32_t GetCategoryMask() const { return m_categories.load(); }
+        uint64_t GetCategoryMask() const { return m_categories.load(); }
 
         void EnableCategory(LogFlags flag);
         bool EnableCategory(const std::string& str);
