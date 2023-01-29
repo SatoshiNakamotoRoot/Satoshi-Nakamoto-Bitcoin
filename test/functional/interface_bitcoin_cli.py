@@ -30,7 +30,12 @@ JSON_PARSING_ERROR = 'error: Error parsing JSON: foo'
 BLOCKS_VALUE_OF_ZERO = 'error: the first argument (number of blocks to generate, default: 1) must be an integer value greater than zero'
 TOO_MANY_ARGS = 'error: too many arguments (maximum 2 for nblocks and maxtries)'
 WALLET_NOT_LOADED = 'Requested wallet does not exist or is not loaded'
-WALLET_NOT_SPECIFIED = 'Wallet file not specified'
+WALLET_NOT_SPECIFIED = (
+    "Multiple wallets are loaded. Please select which wallet to use by requesting the RPC "
+    "through the /wallet/<filename> URI path. Or for the CLI, specify the \"-rpcwallet=<filename>\" "
+    "option before the command (run \"bitcoin-cli -h\" for help or \"bitcoin-cli listwallets\" to see "
+    "which wallets are currently loaded)."
+)
 
 
 def cli_get_info_string_to_dict(cli_get_info_string):
