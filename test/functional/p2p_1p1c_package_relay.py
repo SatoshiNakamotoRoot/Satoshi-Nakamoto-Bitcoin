@@ -196,13 +196,6 @@ class PackageRelayTest(BitcoinTestFramework):
                 peer.send_and_ping(msg_inv([inv]))
                 peer.wait_for_getdata([int(tx.getwtxid(), 16)])
                 peer.send_and_ping(msg_tx(tx))
-            # This disconnect removes any sent orphans from the orphanage (EraseForPeer) and times
-            # out the in-flight requests.  It is currently required for the test to pass right now,
-            # because the node will not (re)try requesting orphan parents from multiple peers if the
-            # first one fails.
-            # TODO: remove this and test that the node retries orphan resolution with other peers
-            # when the first try fails.
-            peer.peer_disconnect()
 
         self.log.info("Submit full packages to node0")
         for package_hex in self.packages_to_submit:
