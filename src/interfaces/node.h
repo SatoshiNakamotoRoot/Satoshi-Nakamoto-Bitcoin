@@ -48,11 +48,11 @@ struct BlockTip;
 //! Block and header tip information
 struct BlockAndHeaderTipInfo
 {
-    int block_height;
-    int64_t block_time;
-    int header_height;
-    int64_t header_time;
-    double verification_progress;
+    int block_height = -1;
+    int64_t block_time = -1;
+    int header_height = -1;
+    int64_t header_time = -1;
+    double verification_progress = -1;
 };
 
 //! External signer interface used by the GUI.
@@ -201,8 +201,8 @@ public:
     //! Unset RPC timer interface.
     virtual void rpcUnsetTimerInterface(RPCTimerInterface* iface) = 0;
 
-    //! Get unspent outputs associated with a transaction.
-    virtual bool getUnspentOutput(const COutPoint& output, Coin& coin) = 0;
+    //! Get unspent output associated with a transaction.
+    virtual std::optional<Coin> getUnspentOutput(const COutPoint& output) = 0;
 
     //! Broadcast transaction.
     virtual TransactionError broadcastTransaction(CTransactionRef tx, CAmount max_tx_fee, std::string& err_string) = 0;
