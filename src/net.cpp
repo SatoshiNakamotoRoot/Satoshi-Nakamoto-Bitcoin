@@ -2358,6 +2358,28 @@ void CConnman::ProcessFixedSeeds(std::chrono::time_point<NodeClock> start)
                 seed_addrs.erase(std::remove_if(seed_addrs.begin(), seed_addrs.end(),
                                                 [&fixed_seed_networks](const CAddress& addr) { return fixed_seed_networks.count(addr.GetNetwork()) == 0; }),
                                  seed_addrs.end());
+                Shuffle(seed_addrs.begin(), seed_addrs.end(), FastRandomContext());
+
+                // Make AddrFetch connections to 10 fixed seeds first. This reduces the
+                // load on the fixed seeds that would otherwise be serving blocks for
+                // many new peers requiring IBD. Try this with multiple fixed seeds for
+                // a better diversity of received addrs and because some may be offline.
+                const std::chrono::minutes wait_time{2};
+                LogPrintf("Initiating AddrFetch connections to fixed seeds. This might take up to %d minutes.\n", wait_time.count());
+                for (size_t addr_pos = 0; addr_pos < 10; ++addr_pos) {
+                    if (addr_pos >= seed_addrs.size()) {
+                        break;
+                    }
+                    AddAddrFetch(seed_addrs.at(addr_pos).ToStringAddr());
+                }
+                // Give AddrFetch peers some time to provide us with addresses
+                // before adding the fixed seeds to AddrMan
+                if (!interruptNet.sleep_for(wait_time)) {
+                    return;
+                }
+                // The fixed seeds queried in the previous steps might have been offline,
+                // failed to send us any addresses or sent us fake ones. As a fallback for this,
+                // we now add all reachable fixed seeds to AddrMan.
                 CNetAddr local;
                 local.SetInternal("fixedseeds");
                 addrman.Add(seed_addrs, local);
