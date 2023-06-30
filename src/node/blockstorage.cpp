@@ -828,13 +828,13 @@ FlatFileSeq BlockManager::UndoFileSeq() const
 
 AutoFile BlockManager::OpenBlockFile(const FlatFilePos& pos, bool fReadOnly) const
 {
-    return AutoFile{BlockFileSeq().Open(pos, fReadOnly)};
+    return AutoFile{BlockFileSeq().Open(pos, fReadOnly), m_xor_key};
 }
 
 /** Open an undo file (rev?????.dat) */
 AutoFile BlockManager::OpenUndoFile(const FlatFilePos& pos, bool fReadOnly) const
 {
-    return AutoFile{UndoFileSeq().Open(pos, fReadOnly)};
+    return AutoFile{UndoFileSeq().Open(pos, fReadOnly), m_xor_key};
 }
 
 fs::path BlockManager::GetBlockPosFilename(const FlatFilePos& pos) const
@@ -1153,6 +1153,12 @@ FlatFilePos BlockManager::SaveBlockToDisk(const CBlock& block, int nHeight)
     }
     return blockPos;
 }
+
+BlockManager::BlockManager(const util::SignalInterrupt& interrupt, Options opts)
+    : m_prune_mode{opts.prune_target > 0},
+      m_xor_key{},
+      m_opts{std::move(opts)},
+      m_interrupt{interrupt} {}
 
 class ImportingNow
 {
