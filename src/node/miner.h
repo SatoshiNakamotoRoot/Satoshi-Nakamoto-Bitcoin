@@ -6,6 +6,7 @@
 #ifndef BITCOIN_NODE_MINER_H
 #define BITCOIN_NODE_MINER_H
 
+#include <policy/feerate.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <txmempool.h>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <stdint.h>
+#include <tuple>
 
 #include <boost/multi_index/identity.hpp>
 #include <boost/multi_index/indexed_by.hpp>
@@ -38,6 +40,7 @@ struct CBlockTemplate
     std::vector<CAmount> vTxFees;
     std::vector<int64_t> vTxSigOpsCost;
     std::vector<unsigned char> vchCoinbaseCommitment;
+    std::vector<std::tuple<CFeeRate, uint32_t>> vFeeratePerSize;
 };
 
 // Container for tracking updates to ancestor feerate as we include (parent)
@@ -143,6 +146,7 @@ private:
     uint64_t nBlockSigOpsCost;
     CAmount nFees;
     std::unordered_set<Txid, SaltedTxidHasher> inBlock;
+    std::vector<std::tuple<CFeeRate, uint32_t>> feerate_per_size;
 
     // Chain context for the block
     int nHeight;
