@@ -32,6 +32,7 @@ struct CNodeStateStats {
     std::chrono::microseconds m_ping_wait;
     std::vector<int> vHeightInFlight;
     bool m_relay_txs;
+    bool m_package_relay;
     CAmount m_fee_filter_received;
     uint64_t m_addr_processed = 0;
     uint64_t m_addr_rate_limited = 0;
@@ -45,7 +46,8 @@ class PeerManager : public CValidationInterface, public NetEventsInterface
 public:
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,
                                              BanMan* banman, ChainstateManager& chainman,
-                                             CTxMemPool& pool, bool ignore_incoming_txs);
+                                             CTxMemPool& pool, bool ignore_incoming_txs,
+                                             bool enable_package_relay);
     virtual ~PeerManager() { }
 
     /**

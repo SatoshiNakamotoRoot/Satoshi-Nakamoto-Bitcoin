@@ -22,6 +22,7 @@
 #include <netbase.h>
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
+#include <node/txpackagetracker.h>
 #include <node/txreconciliation.h>
 #include <policy/fees.h>
 #include <policy/policy.h>
@@ -36,7 +37,6 @@
 #include <timedata.h>
 #include <tinyformat.h>
 #include <txmempool.h>
-#include <txorphanage.h>
 #include <txrequest.h>
 #include <util/check.h> // For NDEBUG compile time check
 #include <util/strencodings.h>
@@ -258,6 +258,10 @@ struct Peer {
 
     /** Whether this peer relays txs via wtxid */
     std::atomic<bool> m_wtxid_relay{false};
+
+    /** Whether this peer relays packages */
+    std::atomic<bool> m_package_relay{false};
+
     /** The feerate in the most recent BIP133 `feefilter` message sent to the peer.
      *  It is *not* a p2p protocol violation for the peer to send us
      *  transactions with a lower fee rate than this. See BIP133. */
@@ -487,7 +491,8 @@ class PeerManagerImpl final : public PeerManager
 public:
     PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                     BanMan* banman, ChainstateManager& chainman,
-                    CTxMemPool& pool, bool ignore_incoming_txs);
+                    CTxMemPool& pool, bool ignore_incoming_txs,
+                    bool enable_package_relay);
 
     /** Overridden from CValidationInterface. */
     void BlockConnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override
@@ -593,6 +598,10 @@ private:
     bool ProcessOrphanTx(Peer& peer)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex);
 
+    /** Validate package if any */
+    void ProcessPackage(CNode& node, const node::TxPackageTracker::PackageToValidate& package)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex);
+
     /** Process a single headers message from a peer.
      *
      * @param[in]   pfrom     CNode of the peer
@@ -675,6 +684,15 @@ private:
     void AddTxAnnouncement(const CNode& node, const GenTxid& gtxid, std::chrono::microseconds current_time)
         EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
 
+    /** Helper function for AddOrphanResolutionCandidates, but can also be called by itself if the
+     * orphan is announced again later. */
+    void AddOrphanAnnouncer(NodeId nodeid, const uint256& orphan_wtxid, const CTransactionRef& tx, std::chrono::microseconds current_time)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_peer_mutex);
+
+    /** Register with orphan TxRequestTracker that a peer may help us resolve this orphan. */
+    void AddOrphanResolutionCandidates(const CTransactionRef& orphan, NodeId originator)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main, !m_peer_mutex);
+
     /** Send a version message to a peer */
     void PushNodeVersion(CNode& pnode, const Peer& peer);
 
@@ -711,6 +729,7 @@ private:
     CTxMemPool& m_mempool;
     TxRequestTracker m_txrequest GUARDED_BY(::cs_main);
     std::unique_ptr<TxReconciliationTracker> m_txreconciliation;
+    std::unique_ptr<node::TxPackageTracker> m_txpackagetracker;
 
     /** The height of the best chain */
     std::atomic<int> m_best_height{-1};
@@ -720,6 +739,9 @@ private:
 
     /** Whether this node is running in -blocksonly mode */
     const bool m_ignore_incoming_txs;
+
+    /** Whether this node does package relay */
+    const bool m_enable_package_relay;
 
     bool RejectIncomingTxs(const CNode& peer) const;
 
@@ -767,6 +789,9 @@ private:
     /** Number of peers with wtxid relay. */
     std::atomic<int> m_wtxid_relay_peers{0};
 
+    /** Number of peers with package relay. */
+    std::atomic<int> m_package_relay_peers{0};
+
     /** Number of outbound peers with m_chain_sync.m_protect. */
     int m_outbound_peers_with_protect_from_disconnect GUARDED_BY(cs_main) = 0;
 
@@ -776,13 +801,18 @@ private:
     /** Stalling timeout for blocks in IBD */
     std::atomic<std::chrono::seconds> m_block_stalling_timeout{BLOCK_STALLING_TIMEOUT_DEFAULT};
 
-    bool AlreadyHaveTx(const GenTxid& gtxid)
+    bool AlreadyHaveTx(const GenTxid& gtxid, bool include_orphanage = true)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main, !m_recent_confirmed_transactions_mutex);
 
     /**
-     * Filter for transactions that were recently rejected by the mempool.
-     * These are not rerequested until the chain tip changes, at which point
-     * the entire filter is reset.
+     * Filter for transactions that were recently rejected by the mempool for reasons other than too
+     * low fee. This filter only contains wtxids and txids of individual transactions.
+     *
+     * Upon receiving an announcement for a transaction, if it exists in this filter, do not
+     * download the txdata. Upon receiving a package info, if it contains a transaction in this
+     * filter, do not download the tx data.
+     *
+     * Reset this filter when the chain tip changes.
      *
      * Without this filter we'd be re-requesting txs from each of our peers,
      * increasing bandwidth consumption considerably. For instance, with 100
@@ -814,6 +844,33 @@ private:
      * Memory used: 1.3 MB
      */
     CRollingBloomFilter m_recent_rejects GUARDED_BY(::cs_main){120'000, 0.000'001};
+    /**
+     * Filter for transactions or packages of transactions that were recently rejected by
+     * the mempool but are eligible for reconsideration if submitted with other transactions.
+     * This filter only contains wtxids of individual transactions and combined hashes of packages
+     * (see GetCombinedHash and GetPackageHash).
+     *
+     * When a transaction's error is TX_LOW_FEE (in a package or by itself), add its wtxid to this
+     * filter. If it was in a package, also add the combined hash of the transactions in its
+     * subpackage to this filter. When a package fails for any reason, add the combined hash of all
+     * transactions in the package info to this filter.
+     *
+     * Upon receiving an announcement for a transaction, if it exists in this filter, do not
+     * download the txdata. Upon receiving a package info, if the combined hash of its transactions
+     * are in this filter, do not download the txdata.
+     *
+     * Reset this filter when the chain tip changes.
+     *
+     * We will only add wtxids to this filter. Groups of multiple transactions are represented by
+     * the hash of their wtxids, concatenated together in lexicographical order.
+     *
+     * Parameters are picked to be identical to that of m_recent_rejects, with the same rationale.
+     * Memory used: 1.3 MB
+     * FIXME: this filter can probably be smaller, but how much smaller?
+     */
+    CRollingBloomFilter m_recent_rejects_reconsiderable GUARDED_BY(::cs_main){120'000, 0.000'001};
+    /** The block hash of the chain tip at which transactions in m_recent_rejects and
+     * m_recent_rejects_reconsiderable were rejected. */
     uint256 hashRecentRejectsChainTip GUARDED_BY(cs_main);
 
     /*
@@ -911,6 +968,10 @@ private:
     CTransactionRef FindTxForGetData(const Peer::TxRelay& tx_relay, const GenTxid& gtxid, const std::chrono::seconds mempool_req, const std::chrono::seconds now)
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, NetEventsInterface::g_msgproc_mutex);
 
+    /** Get AncPkgInfo for a transaction. Returns std::nullopt if something is wrong and the
+     * node should be disconnected. */
+    std::optional<std::vector<uint256>> MaybeGetAncPkgInfo(Peer& peer, const CTransactionRef& tx);
+
     void ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
         EXCLUSIVE_LOCKS_REQUIRED(!m_most_recent_block_mutex, peer.m_getdata_requests_mutex, NetEventsInterface::g_msgproc_mutex)
         LOCKS_EXCLUDED(::cs_main);
@@ -935,9 +996,6 @@ private:
 
     /** Number of peers from which we're downloading blocks. */
     int m_peers_downloading_from GUARDED_BY(cs_main) = 0;
-
-    /** Storage for orphan information */
-    TxOrphanage m_orphanage;
 
     void AddToCompactExtraTransactions(const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
@@ -1434,6 +1492,54 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
     }
 }
 
+void PeerManagerImpl::AddOrphanAnnouncer(NodeId nodeid, const uint256& orphan_wtxid, const CTransactionRef& tx, std::chrono::microseconds current_time)
+{
+    AssertLockHeld(::cs_main); // For m_txrequest
+    const bool connected = m_connman.ForNode(nodeid, [](CNode* node) { return node->fSuccessfullyConnected && !node->fDisconnect; });
+    if (!connected) return;
+    if (m_txpackagetracker->Count(nodeid) + m_txrequest.Count(nodeid) >= MAX_PEER_TX_ANNOUNCEMENTS) {
+        // Too many queued announcements. Request from a different peer.
+        // TODO: Allow peers with Relay permissions to bypass this restriction.
+        return;
+    }
+    const CNodeState* state = State(nodeid);
+    // Decide the TxRequestTracker parameters for this orphan resolution.
+    // TxPackageTracker may also increase the delay.
+    // - "preferred": if fPreferredDownload is set (= outbound, or NetPermissionFlags::NoBan permission)
+    // - "reqtime": current time plus delays for:
+    //   - NONPREF_PEER_TX_DELAY for announcements from non-preferred connections
+    //   - TXID_RELAY_DELAY for txid-based parent requests while package relay peers are available
+    //   - OVERLOADED_PEER_TX_DELAY for announcements from peers which have at least
+    //     MAX_PEER_TX_REQUEST_IN_FLIGHT requests in flight
+    //     TODO: allow peers with Relay permissions to bypass this restiction
+    auto delay{0us};
+    const bool preferred = state->fPreferredDownload;
+    if (!preferred) delay += NONPREF_PEER_TX_DELAY;
+    const bool overloaded = m_txrequest.CountInFlight(nodeid) >= MAX_PEER_TX_REQUEST_IN_FLIGHT;
+    const auto peer_ref{GetPeerRef(nodeid)};
+    if (!peer_ref) return;
+    if (!peer_ref->m_package_relay && m_package_relay_peers > 0) delay += TXID_RELAY_DELAY;
+    if (overloaded) delay += OVERLOADED_PEER_TX_DELAY;
+    // Note that TxPackageTracker may also decide to delay or drop this request.
+    m_txpackagetracker->AddOrphanTx(nodeid, orphan_wtxid, tx, preferred, current_time + delay);
+}
+void PeerManagerImpl::AddOrphanResolutionCandidates(const CTransactionRef& orphan, NodeId originator)
+{
+    const auto current_time{GetTime<std::chrono::microseconds>()};
+
+    // The originator will not show up in GetCandidatePeers() since we already requested from them.
+    AddOrphanAnnouncer(originator, orphan->GetWitnessHash(), orphan, current_time);
+    // We prefer to request the orphan's ancestors via package relay rather than txids
+    // of missing inputs. Also, if the first request fails, we should try again.
+    // Get all peers that announced this transaction and prioritize accordingly...
+    for (const auto nodeid : m_txrequest.GetCandidatePeers(orphan->GetWitnessHash())) {
+        AddOrphanAnnouncer(nodeid, orphan->GetWitnessHash(), orphan, current_time);
+    }
+    for (const auto nodeid : m_txrequest.GetCandidatePeers(orphan->GetHash())) {
+        AddOrphanAnnouncer(nodeid, orphan->GetWitnessHash(), orphan, current_time);
+    }
+}
+
 void PeerManagerImpl::AddTxAnnouncement(const CNode& node, const GenTxid& gtxid, std::chrono::microseconds current_time)
 {
     AssertLockHeld(::cs_main); // For m_txrequest
@@ -1522,7 +1628,9 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         assert(peer != nullptr);
         misbehavior = WITH_LOCK(peer->m_misbehavior_mutex, return peer->m_misbehavior_score);
         m_wtxid_relay_peers -= peer->m_wtxid_relay;
+        m_package_relay_peers -= peer->m_package_relay;
         assert(m_wtxid_relay_peers >= 0);
+        assert(m_package_relay_peers >= 0);
     }
     CNodeState *state = State(nodeid);
     assert(state != nullptr);
@@ -1541,9 +1649,9 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
             }
         }
     }
-    m_orphanage.EraseForPeer(nodeid);
     m_txrequest.DisconnectedPeer(nodeid);
     if (m_txreconciliation) m_txreconciliation->ForgetPeer(nodeid);
+    m_txpackagetracker->DisconnectedPeer(nodeid);
     m_num_preferred_download_peers -= state->fPreferredDownload;
     m_peers_downloading_from -= (!state->vBlocksInFlight.empty());
     assert(m_peers_downloading_from >= 0);
@@ -1559,8 +1667,9 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         assert(m_peers_downloading_from == 0);
         assert(m_outbound_peers_with_protect_from_disconnect == 0);
         assert(m_wtxid_relay_peers == 0);
+        assert(m_package_relay_peers == 0);
         assert(m_txrequest.Size() == 0);
-        assert(m_orphanage.Size() == 0);
+        assert(m_txpackagetracker->OrphanageSize() == 0);
     }
     } // cs_main
     if (node.fSuccessfullyConnected && misbehavior == 0 &&
@@ -1634,6 +1743,7 @@ bool PeerManagerImpl::GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) c
         stats.m_fee_filter_received = 0;
     }
 
+    stats.m_package_relay = peer->m_package_relay;
     stats.m_ping_wait = ping_wait;
     stats.m_addr_processed = peer->m_addr_processed.load();
     stats.m_addr_rate_limited = peer->m_addr_rate_limited.load();
@@ -1756,6 +1866,7 @@ bool PeerManagerImpl::MaybePunishNodeForTx(NodeId nodeid, const TxValidationStat
     case TxValidationResult::TX_CONFLICT:
     case TxValidationResult::TX_MEMPOOL_POLICY:
     case TxValidationResult::TX_NO_MEMPOOL:
+    case TxValidationResult::TX_LOW_FEE:
         break;
     }
     return false;
@@ -1809,27 +1920,31 @@ std::optional<std::string> PeerManagerImpl::FetchBlock(NodeId peer_id, const CBl
 
 std::unique_ptr<PeerManager> PeerManager::make(CConnman& connman, AddrMan& addrman,
                                                BanMan* banman, ChainstateManager& chainman,
-                                               CTxMemPool& pool, bool ignore_incoming_txs)
+                                               CTxMemPool& pool, bool ignore_incoming_txs,
+                                               bool enable_package_relay)
 {
-    return std::make_unique<PeerManagerImpl>(connman, addrman, banman, chainman, pool, ignore_incoming_txs);
+    return std::make_unique<PeerManagerImpl>(connman, addrman, banman, chainman, pool, ignore_incoming_txs, enable_package_relay);
 }
 
 PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                                  BanMan* banman, ChainstateManager& chainman,
-                                 CTxMemPool& pool, bool ignore_incoming_txs)
+                                 CTxMemPool& pool, bool ignore_incoming_txs,
+                                 bool enable_package_relay)
     : m_chainparams(chainman.GetParams()),
       m_connman(connman),
       m_addrman(addrman),
       m_banman(banman),
       m_chainman(chainman),
       m_mempool(pool),
-      m_ignore_incoming_txs(ignore_incoming_txs)
+      m_ignore_incoming_txs(ignore_incoming_txs),
+      m_enable_package_relay{enable_package_relay}
 {
     // While Erlay support is incomplete, it must be enabled explicitly via -txreconciliation.
     // This argument can go away after Erlay support is complete.
     if (gArgs.GetBoolArg("-txreconciliation", DEFAULT_TXRECONCILIATION_ENABLE)) {
         m_txreconciliation = std::make_unique<TxReconciliationTracker>(TXRECONCILIATION_VERSION);
     }
+    m_txpackagetracker = std::make_unique<node::TxPackageTracker>();
 }
 
 void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
@@ -1854,7 +1969,7 @@ void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
  */
 void PeerManagerImpl::BlockConnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindex)
 {
-    m_orphanage.EraseForBlock(*pblock);
+    m_txpackagetracker->BlockConnected(*pblock);
     m_last_tip_update = GetTime<std::chrono::seconds>();
 
     {
@@ -2035,7 +2150,7 @@ void PeerManagerImpl::BlockChecked(const CBlock& block, const BlockValidationSta
 //
 
 
-bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid)
+bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_orphanage)
 {
     if (m_chainman.ActiveChain().Tip()->GetBlockHash() != hashRecentRejectsChainTip) {
         // If the chain tip has changed previously rejected transactions
@@ -2044,18 +2159,19 @@ bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid)
         // txs a second chance.
         hashRecentRejectsChainTip = m_chainman.ActiveChain().Tip()->GetBlockHash();
         m_recent_rejects.reset();
+        m_recent_rejects_reconsiderable.reset();
     }
 
     const uint256& hash = gtxid.GetHash();
 
-    if (m_orphanage.HaveTx(gtxid)) return true;
+    if (include_orphanage && m_txpackagetracker->OrphanageHaveTx(gtxid)) return true;
 
     {
         LOCK(m_recent_confirmed_transactions_mutex);
         if (m_recent_confirmed_transactions.contains(hash)) return true;
     }
 
-    return m_recent_rejects.contains(hash) || m_mempool.exists(gtxid);
+    return m_recent_rejects.contains(hash) || m_recent_rejects_reconsiderable.contains(hash) || m_mempool.exists(gtxid);
 }
 
 bool PeerManagerImpl::AlreadyHaveBlock(const uint256& block_hash)
@@ -2318,6 +2434,31 @@ CTransactionRef PeerManagerImpl::FindTxForGetData(const Peer::TxRelay& tx_relay,
     return {};
 }
 
+std::optional<std::vector<uint256>> PeerManagerImpl::MaybeGetAncPkgInfo(Peer& peer, const CTransactionRef& tx)
+{
+    if (!peer.m_package_relay) {
+        return std::nullopt;
+    }
+    CTxMemPool::setEntries ancestors;
+    {
+        LOCK(m_mempool.cs);
+        auto txiter{m_mempool.GetIter(tx->GetHash())};
+        if (txiter == std::nullopt) {
+            // This tx is no longer in mempool (maybe in mapRelay)
+            return std::vector<uint256>({});
+        }
+        ancestors = m_mempool.AssumeCalculateMemPoolAncestors(__func__, **txiter, CTxMemPool::Limits::NoLimits(), /*fSearchForParents=*/false);
+        // Otherwise the transaction will appear multiple times in the wtxids list.
+        Assume(ancestors.count(txiter.value()) == 0);
+    }
+    std::vector<uint256> ancestor_package_wtxids;
+    std::transform(ancestors.cbegin(), ancestors.cend(), std::back_inserter(ancestor_package_wtxids),
+        [](const auto& entry){return entry->GetTx().GetWitnessHash();});
+    // Last wtxid is the representative tx, even if it has no unconfirmed ancestors.
+    ancestor_package_wtxids.push_back(tx->GetWitnessHash());
+    return ancestor_package_wtxids;
+}
+
 void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic<bool>& interruptMsgProc)
 {
     AssertLockNotHeld(cs_main);
@@ -2335,7 +2476,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
     // Process as many TX items from the front of the getdata queue as
     // possible, since they're common and it's efficient to batch process
     // them.
-    while (it != peer.m_getdata_requests.end() && it->IsGenTxMsg()) {
+    while (it != peer.m_getdata_requests.end() && (it->IsGenTxMsg() || it->IsMsgAncPkgInfo())) {
         if (interruptMsgProc) return;
         // The send buffer provides backpressure. If there's no space in
         // the buffer, pause processing until the next call.
@@ -2351,9 +2492,24 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
 
         CTransactionRef tx = FindTxForGetData(*tx_relay, ToGenTxid(inv), mempool_req, now);
         if (tx) {
-            // WTX and WITNESS_TX imply we serialize with witness
-            int nSendFlags = (inv.IsMsgTx() ? SERIALIZE_TRANSACTION_NO_WITNESS : 0);
-            m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::TX, *tx));
+            if (inv.IsGenTxMsg()) {
+                // WTX and WITNESS_TX imply we serialize with witness
+                int nSendFlags = (inv.IsMsgTx() ? SERIALIZE_TRANSACTION_NO_WITNESS : 0);
+                m_connman.PushMessage(&pfrom, msgMaker.Make(nSendFlags, NetMsgType::TX, *tx));
+            } else if (inv.IsMsgAncPkgInfo()) {
+                auto ancestor_wtxids = MaybeGetAncPkgInfo(peer, tx);
+                if (ancestor_wtxids == std::nullopt) {
+                    pfrom.fDisconnect = true;
+                    // No need to process the other requests if we are disconnecting the peer.
+                    LogPrint(BCLog::NET, "\nDisconnecting peer %d -- requested ancpkginfo but not allowed\n", pfrom.GetId());
+                    return;
+                } else if (ancestor_wtxids->empty()) {
+                    // Couldn't create the ancpkginfo for some reason, send a notfound.
+                    vNotFound.push_back(inv);
+                    continue;
+                }
+                m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::ANCPKGINFO, ancestor_wtxids.value()));
+            }
             m_mempool.RemoveUnbroadcastTx(tx->GetHash());
             // As we're going to send tx, make sure its unconfirmed parents are made requestable.
             std::vector<uint256> parent_ids_to_add;
@@ -2366,6 +2522,7 @@ void PeerManagerImpl::ProcessGetData(CNode& pfrom, Peer& peer, const std::atomic
                     for (const CTxMemPoolEntry& parent : parents) {
                         if (parent.GetTime() > now - UNCONDITIONAL_RELAY_DELAY) {
                             parent_ids_to_add.push_back(parent.GetTx().GetHash());
+                            parent_ids_to_add.push_back(parent.GetTx().GetWitnessHash());
                         }
                     }
                 }
@@ -2957,7 +3114,7 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
 
     CTransactionRef porphanTx = nullptr;
 
-    while (CTransactionRef porphanTx = m_orphanage.GetTxToReconsider(peer.m_id)) {
+    while (CTransactionRef porphanTx = m_txpackagetracker->GetTxToReconsider(peer.m_id)) {
         const MempoolAcceptResult result = m_chainman.ProcessTransaction(porphanTx);
         const TxValidationState& state = result.m_state;
         const uint256& orphanHash = porphanTx->GetHash();
@@ -2965,11 +3122,12 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             LogPrint(BCLog::MEMPOOL, "   accepted orphan tx %s\n", orphanHash.ToString());
             RelayTransaction(orphanHash, porphanTx->GetWitnessHash());
-            m_orphanage.AddChildrenToWorkSet(*porphanTx);
-            m_orphanage.EraseTx(orphanHash);
+            m_txpackagetracker->AddChildrenToWorkSet(*porphanTx);
+            m_txpackagetracker->EraseOrphanTx(porphanTx->GetWitnessHash());
             for (const CTransactionRef& removedTx : result.m_replaced_transactions.value()) {
                 AddToCompactExtraTransactions(removedTx);
             }
+            m_txpackagetracker->FinalizeTransactions({porphanTx->GetWitnessHash()}, {});
             return true;
         } else if (state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) {
             if (state.IsInvalid()) {
@@ -3012,12 +3170,84 @@ bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
                     m_recent_rejects.insert(porphanTx->GetHash());
                 }
             }
-            m_orphanage.EraseTx(orphanHash);
+            m_txpackagetracker->EraseOrphanTx(porphanTx->GetWitnessHash());
             return true;
         }
     }
 
     return false;
+}
+
+void PeerManagerImpl::ProcessPackage(CNode& node, const node::TxPackageTracker::PackageToValidate& package)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    LOCK(cs_main);
+    // We won't re-validate the exact same transaction or package again.
+    if (m_recent_rejects_reconsiderable.contains(GetPackageHash(package.m_unvalidated_txns))) {
+        // Should we do anything else here?
+        return;
+    }
+    const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool,
+                                                package.m_unvalidated_txns, /*test_accept=*/false)};
+    if (package_result.m_state.IsInvalid()) {
+        // If another peer sends the same packageinfo again, we can immediately reject it without
+        // re-downloading the transactions. Note that state.IsInvalid() doesn't mean all
+        // transactions have been rejected.
+        m_recent_rejects_reconsiderable.insert(package.m_pkginfo_hash);
+    }
+    std::set<uint256> successful_txns;
+    std::set<uint256> invalid_final_txns;
+    for (const auto& tx : package.m_unvalidated_txns) {
+        const auto& txid = tx->GetHash();
+        const auto& wtxid = tx->GetWitnessHash();
+        const auto result{package_result.m_tx_results.find(wtxid)};
+        if (package_result.m_state.IsValid() ||
+            package_result.m_state.GetResult() == PackageValidationResult::PCKG_TX) {
+            // If PCKG_TX or valid, every tx should have a result.
+            Assume(result != package_result.m_tx_results.end());
+        }
+        if (result == package_result.m_tx_results.end()) break;
+        if (result->second.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+            LogPrint(BCLog::MEMPOOL, "\nProcessPackage: tx %s from peer=%d accepted\n", txid.ToString(), node.GetId());
+            successful_txns.insert(wtxid);
+            m_txrequest.ForgetTxHash(txid);
+            m_txrequest.ForgetTxHash(wtxid);
+            RelayTransaction(txid, wtxid);
+            node.m_last_tx_time = GetTime<std::chrono::seconds>();
+            for (const CTransactionRef& removedTx : result->second.m_replaced_transactions.value()) {
+                AddToCompactExtraTransactions(removedTx);
+            }
+        } else if (result->second.m_state.GetResult() != TxValidationResult::TX_WITNESS_STRIPPED) {
+            if (result->second.m_state.GetResult() == TxValidationResult::TX_LOW_FEE) {
+                m_recent_rejects_reconsiderable.insert(wtxid);
+                // FIXME: also cache subpackage failure
+            } else {
+                m_recent_rejects.insert(wtxid);
+                if (result->second.m_state.GetResult() == TxValidationResult::TX_INPUTS_NOT_STANDARD && wtxid != txid) {
+                    m_recent_rejects.insert(txid);
+                    m_txrequest.ForgetTxHash(txid);
+                } else if (result->second.m_state.GetResult() == TxValidationResult::TX_CONSENSUS) {
+                    invalid_final_txns.insert(wtxid);
+                }
+            }
+            m_txrequest.ForgetTxHash(wtxid);
+            if (RecursiveDynamicUsage(*tx) < 100000) {
+                AddToCompactExtraTransactions(tx);
+            }
+            LogPrint(BCLog::MEMPOOLREJ, "\nProcessPackage: %s from peer=%d was not accepted: %s\n",
+                     wtxid.ToString(), node.GetId(), result->second.m_state.ToString());
+            MaybePunishNodeForTx(wtxid == package.m_rep_wtxid ? node.GetId() : package.m_info_provider, result->second.m_state);
+        }
+        m_txpackagetracker->EraseOrphanTx(wtxid);
+    }
+    m_txpackagetracker->FinalizeTransactions(successful_txns, invalid_final_txns);
+    // Do this last to avoid adding children that were already validated within this package.
+    for (const auto& tx : package.m_unvalidated_txns) {
+        auto iter{package_result.m_tx_results.find(tx->GetWitnessHash())};
+        if (iter != package_result.m_tx_results.end() && iter->second.m_result_type == MempoolAcceptResult::ResultType::VALID) {
+            m_txpackagetracker->AddChildrenToWorkSet(*tx);
+        }
+    }
 }
 
 bool PeerManagerImpl::PrepareBlockFilterRequest(CNode& node, Peer& peer,
@@ -3388,6 +3618,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         if (greatest_common_version >= WTXID_RELAY_VERSION) {
             m_connman.PushMessage(&pfrom, msg_maker.Make(NetMsgType::WTXIDRELAY));
+            if (m_enable_package_relay) {
+                m_txpackagetracker->ReceivedVersion(peer->m_id);
+                if (!m_ignore_incoming_txs) {
+                    // Always send a sendpackages for each version we support if:
+                    // - Protocol version is at least WTXID_RELAY_VERSION
+                    // - We have package relay enabled
+                    // - We are not in blocksonly mode.
+                    m_connman.PushMessage(&pfrom, msg_maker.Make(NetMsgType::SENDPACKAGES, uint64_t{m_txpackagetracker->GetSupportedVersions()}));
+                }
+            }
         }
 
         // Signal ADDRv2 support (BIP155).
@@ -3578,6 +3818,10 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                        tx_relay->m_next_inv_send_time == 0s));
         }
 
+        if (m_enable_package_relay && m_txpackagetracker->ReceivedVerack(peer->m_id, pfrom.IsInboundConn(), pfrom.m_relays_txs, peer->m_wtxid_relay)) {
+            peer->m_package_relay = true;
+            m_package_relay_peers++;
+        }
         pfrom.fSuccessfullyConnected = true;
         return;
     }
@@ -3602,6 +3846,23 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // save whether peer selects us as BIP152 high-bandwidth peer
         // (receiving sendcmpct(1) signals high-bandwidth, sendcmpct(0) low-bandwidth)
         pfrom.m_bip152_highbandwidth_from = sendcmpct_hb;
+        return;
+    }
+
+    if (msg_type == NetMsgType::SENDPACKAGES) {
+        if (m_enable_package_relay) {
+            if (pfrom.fSuccessfullyConnected) {
+                // Disconnect peers that send a SENDPACKAGES message after VERACK.
+                LogPrint(BCLog::NET, "sendpackages received after verack from peer=%d; disconnecting\n", pfrom.GetId());
+                pfrom.fDisconnect = true;
+                return;
+            }
+            uint64_t sendpackages_versions;
+            vRecv >> sendpackages_versions;
+            m_txpackagetracker->ReceivedSendpackages(peer->m_id, node::PackageRelayVersions{sendpackages_versions});
+        } else {
+            LogPrintLevel(BCLog::NET, BCLog::Level::Debug, "sendpackages from peer=%d ignored, as our node does not have package relay enabled\n", pfrom.GetId());
+        }
         return;
     }
 
@@ -3852,6 +4113,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 AddKnownTx(*peer, inv.hash);
                 if (!fAlreadyHave && !m_chainman.ActiveChainstate().IsInitialBlockDownload()) {
                     AddTxAnnouncement(pfrom, gtxid, current_time);
+                }
+                if (inv.IsMsgWtx() && m_txpackagetracker->OrphanageHaveTx(gtxid) && !m_chainman.ActiveChainstate().IsInitialBlockDownload()) {
+                    AddOrphanAnnouncer(pfrom.GetId(), inv.hash, nullptr, current_time);
                 }
             } else {
                 LogPrint(BCLog::NET, "Unknown inv type \"%s\" received from peer=%d\n", inv.ToString(), pfrom.GetId());
@@ -4112,6 +4376,88 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::ANCPKGINFO) {
+        std::vector<uint256> package_wtxids;
+        vRecv >> package_wtxids;
+        if (package_wtxids.empty()) return;
+        if (!peer->m_package_relay) {
+            LogPrint(BCLog::NET, "ancpkginfo sent in violation of protocol, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (!m_txpackagetracker->PkgInfoAllowed(pfrom.GetId(), package_wtxids.back(), node::PKG_RELAY_ANCPKG)) {
+            LogPrint(BCLog::NET, "unsolicited ancpkginfo sent, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+
+        // Note: Multiple ancestor packages can have the same representative (different ancestors for
+        // honest or malicious reasons). But since we're only using this to resolve orphans, we
+        // should never be in a situation where we have multiple ancpkginfos out for the same wtxid
+        const auto& rep_wtxid{package_wtxids.back()};
+        if (package_wtxids.size() > MAX_PACKAGE_COUNT) {
+            LogPrint(BCLog::NET, "discarding package info for tx %s, too many transactions\n", rep_wtxid.ToString());
+            m_txpackagetracker->ForgetPkgInfo(pfrom.GetId(), package_wtxids.back(), node::PKG_RELAY_ANCPKG);
+            return;
+        }
+        LOCK(::cs_main);
+        if (m_chainman.ActiveChainstate().IsInitialBlockDownload()) return;
+        // We have already validated this exact set of transactions recently, so don't do it again.
+        if (m_recent_rejects_reconsiderable.contains(GetCombinedHash(package_wtxids))) {
+            LogPrint(BCLog::NET, "discarding package info for tx %s, this package has already been rejected\n",
+                     rep_wtxid.ToString());
+            m_txpackagetracker->ForgetPkgInfo(pfrom.GetId(), package_wtxids.back(), node::PKG_RELAY_ANCPKG);
+            return;
+        }
+        for (const auto& wtxid : package_wtxids) {
+            // If a transaction is in m_recent_rejects and not m_recent_rejects_reconsiderable, that
+            // means it will not become valid by adding another transaction.
+            if (m_recent_rejects.contains(wtxid)) {
+                LogPrint(BCLog::NET, "discarding package for tx %s, tx %s has already been rejected and is not eligible for reconsideration\n",
+                         rep_wtxid.ToString(), wtxid.ToString());
+                m_txpackagetracker->ForgetPkgInfo(pfrom.GetId(), package_wtxids.back(), node::PKG_RELAY_ANCPKG);
+                return;
+            }
+        }
+        std::vector<std::pair<uint256, bool>> txdata_status;
+        txdata_status.reserve(package_wtxids.size());
+        std::vector<uint256> pkgtxns_to_request;
+        for (const auto& wtxid : package_wtxids) {
+            AddKnownTx(*peer, wtxid);
+            if (AlreadyHaveTx(GenTxid::Wtxid(wtxid), /*include_orphanage=*/false)) {
+                txdata_status.emplace_back(wtxid, false);
+            } else {
+                txdata_status.emplace_back(wtxid, true);
+                pkgtxns_to_request.push_back(wtxid);
+            }
+        }
+        const auto current_time{GetTime<std::chrono::microseconds>()};
+        // It is correct to continue asking another peer for ancpkginfo because this peer could
+        // have provided a false list of ancestors in order to get us to reject the tx.
+        Assume(txdata_status.size() == package_wtxids.size());
+        const auto result{m_txpackagetracker->ReceivedAncPkgInfo(pfrom.GetId(), rep_wtxid, txdata_status,
+                                               current_time + GETDATA_TX_INTERVAL)};
+        if (std::holds_alternative<node::TxPackageTracker::PackageToValidate>(result)) {
+            ProcessPackage(pfrom, std::get<node::TxPackageTracker::PackageToValidate>(result));
+        } else {
+            const auto& request_list{std::get<std::vector<uint256>>(result)};
+            if (!request_list.empty()) {
+                if (m_txpackagetracker->PeerSupportsVersion(pfrom.GetId(), node::PKG_RELAY_PKGTXNS)) {
+                    // If this peer supports it, request transactions in a batch so they can be
+                    // submitted as a package without hitting the orphanage.
+                    m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETPKGTXNS, request_list));
+                } else {
+                    const auto current_time{GetTime<std::chrono::microseconds>()};
+                    // Otherwise, treat these ancestors as individual transaction announcements.
+                    for (const auto& wtxid : request_list) {
+                        AddTxAnnouncement(pfrom, GenTxid::Wtxid(wtxid), current_time);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     if (msg_type == NetMsgType::TX) {
         if (RejectIncomingTxs(pfrom)) {
             LogPrint(BCLog::NET, "transaction sent in violation of protocol peer=%d\n", pfrom.GetId());
@@ -4183,7 +4529,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             m_txrequest.ForgetTxHash(tx.GetHash());
             m_txrequest.ForgetTxHash(tx.GetWitnessHash());
             RelayTransaction(tx.GetHash(), tx.GetWitnessHash());
-            m_orphanage.AddChildrenToWorkSet(tx);
+            m_txpackagetracker->FinalizeTransactions({tx.GetWitnessHash()}, {});
+            m_txpackagetracker->AddChildrenToWorkSet(tx);
 
             pfrom.m_last_tx_time = GetTime<std::chrono::seconds>();
 
@@ -4199,38 +4546,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         else if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS)
         {
             bool fRejectedParents = false; // It may be the case that the orphans parents have all been rejected
-
-            // Deduplicate parent txids, so that we don't have to loop over
-            // the same parent txid more than once down below.
-            std::vector<uint256> unique_parents;
-            unique_parents.reserve(tx.vin.size());
-            for (const CTxIn& txin : tx.vin) {
-                // We start with all parents, and then remove duplicates below.
-                unique_parents.push_back(txin.prevout.hash);
-            }
-            std::sort(unique_parents.begin(), unique_parents.end());
-            unique_parents.erase(std::unique(unique_parents.begin(), unique_parents.end()), unique_parents.end());
-            for (const uint256& parent_txid : unique_parents) {
+            for (const auto& input : tx.vin) {
+                const auto& parent_txid = input.prevout.hash;
+                AddKnownTx(*peer, parent_txid);
                 if (m_recent_rejects.contains(parent_txid)) {
                     fRejectedParents = true;
                     break;
                 }
             }
             if (!fRejectedParents) {
-                const auto current_time{GetTime<std::chrono::microseconds>()};
-
-                for (const uint256& parent_txid : unique_parents) {
-                    // Here, we only have the txid (and not wtxid) of the
-                    // inputs, so we only request in txid mode, even for
-                    // wtxidrelay peers.
-                    // Eventually we should replace this with an improved
-                    // protocol for getting all unconfirmed parents.
-                    const auto gtxid{GenTxid::Txid(parent_txid)};
-                    AddKnownTx(*peer, parent_txid);
-                    if (!AlreadyHaveTx(gtxid)) AddTxAnnouncement(pfrom, gtxid, current_time);
-                }
-
-                if (m_orphanage.AddTx(ptx, pfrom.GetId())) {
+                const bool had_before{m_txpackagetracker->OrphanageHaveTx(GenTxid::Wtxid(ptx->GetWitnessHash()))};
+                AddOrphanResolutionCandidates(ptx, pfrom.GetId());
+                if (!had_before && m_txpackagetracker->OrphanageHaveTx(GenTxid::Wtxid(ptx->GetWitnessHash()))) {
                     AddToCompactExtraTransactions(ptx);
                 }
 
@@ -4240,7 +4567,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
                 // DoS prevention: do not allow m_orphanage to grow unbounded (see CVE-2012-3789)
                 unsigned int nMaxOrphanTx = (unsigned int)std::max((int64_t)0, gArgs.GetIntArg("-maxorphantx", DEFAULT_MAX_ORPHAN_TRANSACTIONS));
-                m_orphanage.LimitOrphans(nMaxOrphanTx);
+                m_txpackagetracker->LimitOrphans(nMaxOrphanTx);
             } else {
                 LogPrint(BCLog::MEMPOOL, "not keeping orphan with rejected parents %s\n",tx.GetHash().ToString());
                 // We will continue to reject this tx since it has rejected
@@ -4269,7 +4596,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 // See also comments in https://github.com/bitcoin/bitcoin/pull/18044#discussion_r443419034
                 // for concerns around weakening security of unupgraded nodes
                 // if we start doing this too early.
-                m_recent_rejects.insert(tx.GetWitnessHash());
+                if (state.GetResult() == TxValidationResult::TX_LOW_FEE) {
+                    m_recent_rejects_reconsiderable.insert(tx.GetWitnessHash());
+                } else {
+                    m_recent_rejects.insert(tx.GetWitnessHash());
+                }
                 m_txrequest.ForgetTxHash(tx.GetWitnessHash());
                 // If the transaction failed for TX_INPUTS_NOT_STANDARD,
                 // then we know that the witness was irrelevant to the policy
@@ -4725,6 +5056,77 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         return;
     }
 
+    if (msg_type == NetMsgType::GETPKGTXNS) {
+        if (!m_txpackagetracker->PeerSupportsVersion(pfrom.GetId(), node::PKG_RELAY_PKGTXNS)) {
+            LogPrint(BCLog::NET, "\ngetpkgtxns not negotiated, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        unsigned int num_txns = ReadCompactSize(vRecv);
+        if (num_txns == 0) return;
+        if (num_txns > node::MAX_PKGTXNS_COUNT) {
+            LogPrint(BCLog::NET, "\ngetpkgtxns exceeds allowed size, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        std::vector<uint256> txns_requested;
+        txns_requested.resize(num_txns);
+        for (unsigned int n = 0; n < num_txns; ++n) vRecv >> txns_requested[n];
+
+        {
+            LOCK(peer->m_getdata_requests_mutex);
+            std::vector<CTransactionRef> pkgtxns;
+            auto tx_relay = peer->GetTxRelay();
+            const auto mempool_req = tx_relay != nullptr ? tx_relay->m_last_mempool_req.load() : std::chrono::seconds::min();
+            const auto now{GetTime<std::chrono::seconds>()};
+            for (const auto& wtxid : txns_requested) {
+                auto ptx = FindTxForGetData(*peer->GetTxRelay(), GenTxid::Wtxid(wtxid), mempool_req, now);
+                if (ptx) {
+                    pkgtxns.push_back(ptx);
+                } else {
+                    // A getpkgtxns request is all or nothing; if any of the transactions are
+                    // unavailable, return a notfound for the full request.
+                    break;
+                }
+            }
+            if (pkgtxns.size() == txns_requested.size()) {
+                m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::PKGTXNS, pkgtxns));
+            } else {
+                std::vector<CInv> notfound{{CInv{MSG_PKGTXNS, GetCombinedHash(txns_requested)}}};
+                m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::NOTFOUND, notfound));
+            }
+        }
+    }
+
+    if (msg_type == NetMsgType::PKGTXNS) {
+        if (RejectIncomingTxs(pfrom)) {
+            LogPrint(BCLog::NET, "\npkgtxns sent in violation of protocol peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        if (!m_txpackagetracker->PeerSupportsVersion(pfrom.GetId(), node::PKG_RELAY_PKGTXNS)) {
+            LogPrint(BCLog::NET, "\npkgtxns not negotiated, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        unsigned int num_txns = ReadCompactSize(vRecv);
+        if (num_txns == 0) return;
+        if (num_txns > node::MAX_PKGTXNS_COUNT) {
+            LogPrint(BCLog::NET, "\npkgtxns exceeds allowed size, disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        std::vector<CTransactionRef> package_txns;
+        package_txns.resize(num_txns);
+        for (unsigned int n = 0; n < num_txns; n++) {
+            vRecv >> package_txns[n];
+        }
+        if (const auto package_to_validate{m_txpackagetracker->ReceivedPkgTxns(pfrom.GetId(), package_txns)}) {
+            ProcessPackage(pfrom, package_to_validate.value());
+        }
+        return;
+    }
+
     if (msg_type == NetMsgType::PING) {
         if (pfrom.GetCommonVersion() > BIP0031_VERSION) {
             uint64_t nonce = 0;
@@ -4909,6 +5311,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // If we receive a NOTFOUND message for a tx we requested, mark the announcement for it as
                     // completed in TxRequestTracker.
                     m_txrequest.ReceivedResponse(pfrom.GetId(), inv.hash);
+                } else if (inv.IsMsgAncPkgInfo() && m_enable_package_relay) {
+                    if (!m_txpackagetracker->PkgInfoAllowed(pfrom.GetId(), inv.hash, node::PKG_RELAY_ANCPKG)) {
+                        LogPrint(BCLog::NET, "\nUnsolicited ancpkginfo sent, disconnecting peer=%d\n", pfrom.GetId());
+                        // Unsolicited ancpkginfo or peer is not registered for package relay.
+                        pfrom.fDisconnect = true;
+                    }
+                    m_txpackagetracker->ForgetPkgInfo(pfrom.GetId(), inv.hash, node::PKG_RELAY_ANCPKG);
+                } else if (inv.IsMsgPkgTxns() && m_enable_package_relay) {
+                    m_txpackagetracker->ReceivedNotFound(pfrom.GetId(), inv.hash);
                 }
             }
         }
@@ -5026,7 +5437,7 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         //  by another peer that was already processed; in that case,
         //  the extra work may not be noticed, possibly resulting in an
         //  unnecessary 100ms delay)
-        if (m_orphanage.HaveTxToReconsider(peer->m_id)) fMoreWork = true;
+        if (m_txpackagetracker->HaveTxToReconsider(peer->m_id)) fMoreWork = true;
     } catch (const std::exception& e) {
         LogPrint(BCLog::NET, "%s(%s, %u bytes): Exception '%s' (%s) caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size, e.what(), typeid(e).name());
     } catch (...) {
@@ -5785,6 +6196,13 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         // Peer told you to not send transactions at that feerate? Don't bother sending it.
                         if (txinfo.fee < filterrate.GetFee(txinfo.vsize)) {
                             continue;
+                        } else if (!peer->m_package_relay) {
+                            // If any of the parents are below the fee filter and the peer doesn't
+                            // support package relay, they probably won't accept this transaction.
+                            // Save older peers' bandwidth by skipping this transaction.
+                            if (auto min_parent_feerate{m_mempool.MinimumFeerateWithParents(ToGenTxid(inv))}) {
+                                if (min_parent_feerate.value() < filterrate) continue;
+                            }
                         }
                         if (tx_relay->m_bloom_filter && !tx_relay->m_bloom_filter->IsRelevantAndUpdate(*txinfo.tx)) continue;
                         // Send
@@ -5901,7 +6319,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         }
 
         //
-        // Message: getdata (transactions)
+        // Message: getdata (transactions and ancpkginfo)
         //
         std::vector<std::pair<NodeId, GenTxid>> expired;
         auto requestable = m_txrequest.GetRequestable(pto->GetId(), current_time, &expired);
@@ -5926,6 +6344,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
         }
 
+        auto requestable_orphans = m_txpackagetracker->GetOrphanRequests(pto->GetId(), current_time);
+        for (const auto& gtxid : requestable_orphans) {
+            if (AlreadyHaveTx(gtxid, /*include_orphanage=*/false)) {
+                m_txpackagetracker->FinalizeTransactions({gtxid.GetHash()}, {});
+            } else {
+                vGetData.emplace_back(gtxid.IsWtxid() ? MSG_ANCPKGINFO : (MSG_TX | GetFetchFlags(*peer)), gtxid.GetHash());
+                if (vGetData.size() >= MAX_GETDATA_SZ) {
+                    m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::GETDATA, vGetData));
+                    vGetData.clear();
+                }
+            }
+        }
 
         if (!vGetData.empty())
             m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::GETDATA, vGetData));
