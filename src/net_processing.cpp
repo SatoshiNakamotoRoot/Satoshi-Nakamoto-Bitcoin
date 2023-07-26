@@ -4148,38 +4148,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             } else {
                 next_task = ProcessInvalidTx(ptx, pfrom.GetId(), state);
                 if (*next_task == node::InvalidTxTask::ADD_ORPHAN) {
-                    // Deduplicate parent txids, so that we don't have to loop over
-                    // the same parent txid more than once down below.
-                    std::vector<Txid> unique_parents;
-                    unique_parents.reserve(tx.vin.size());
-                    for (const CTxIn& txin : tx.vin) {
-                        // We start with all parents, and then remove duplicates below.
-                        unique_parents.push_back(Txid::FromUint256(txin.prevout.hash));
-                    }
-                    std::sort(unique_parents.begin(), unique_parents.end());
-                    unique_parents.erase(std::unique(unique_parents.begin(), unique_parents.end()), unique_parents.end());
                     const auto current_time{GetTime<std::chrono::microseconds>()};
-
-                    for (const uint256& parent_txid : unique_parents) {
-                        // Here, we only have the txid (and not wtxid) of the
-                        // inputs, so we only request in txid mode, even for
-                        // wtxidrelay peers.
-                        // Eventually we should replace this with an improved
-                        // protocol for getting all unconfirmed parents.
-                        const auto gtxid{GenTxid::Txid(parent_txid)};
-                        AddKnownTx(*peer, parent_txid);
-                        // Don't include reconsiderable rejects; we want to request parents that
-                        // were low feerate as this child could CPFP them.
-                        if (!m_txdownloadman.AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false)) {
-                            m_txdownloadman.ReceivedTxInv(pfrom.GetId(), gtxid, current_time);
+                    const auto& [added_new_orphan, unique_parents] = m_txdownloadman.NewOrphanTx(ptx, pfrom.GetId(), current_time);
+                    if (added_new_orphan) {
+                        AddToCompactExtraTransactions(ptx);
+                        for (const uint256& parent_txid : unique_parents) {
+                            AddKnownTx(*peer, parent_txid);
                         }
                     }
-                    m_txdownloadman.GetOrphanageRef().AddTx(ptx, pfrom.GetId(), unique_parents);
-                    // DoS prevention: do not allow m_orphanage to grow unbounded (see CVE-2012-3789)
-                    m_txdownloadman.GetOrphanageRef().LimitOrphans(m_opts.max_orphan_txs, m_rng);
-                }
-                if (RecursiveDynamicUsage(*ptx) < 100000) {
-                    AddToCompactExtraTransactions(ptx);
                 }
             }
         }
