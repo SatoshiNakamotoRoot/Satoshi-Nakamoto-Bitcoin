@@ -74,7 +74,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         tx.vout[0].nValue = 1*CENT;
         tx.vout[0].scriptPubKey = GetScriptForDestination(PKHash(key.GetPubKey()));
 
-        orphanage.AddTx(MakeTransactionRef(tx), i);
+        orphanage.AddTx(MakeTransactionRef(tx), i, {});
     }
 
     // ... and 50 that depend on other orphans:
@@ -92,7 +92,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         SignatureData empty;
         BOOST_CHECK(SignSignature(keystore, *txPrev, tx, 0, SIGHASH_ALL, empty));
 
-        orphanage.AddTx(MakeTransactionRef(tx), i);
+        orphanage.AddTx(MakeTransactionRef(tx), i, {});
     }
 
     // This really-big orphan should be ignored:
@@ -117,7 +117,7 @@ BOOST_AUTO_TEST_CASE(DoS_mapOrphans)
         for (unsigned int j = 1; j < tx.vin.size(); j++)
             tx.vin[j].scriptSig = tx.vin[0].scriptSig;
 
-        BOOST_CHECK(!orphanage.AddTx(MakeTransactionRef(tx), i));
+        BOOST_CHECK(!orphanage.AddTx(MakeTransactionRef(tx), i, {}));
     }
 
     // Test EraseOrphansFor:

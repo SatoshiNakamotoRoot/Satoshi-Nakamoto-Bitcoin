@@ -20,8 +20,10 @@
  */
 class TxOrphanage {
 public:
-    /** Add a new orphan transaction */
-    bool AddTx(const CTransactionRef& tx, NodeId peer) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Add a new orphan transaction. If the tx already exists, add this peer to its list of announcers.
+     * parent_txids should contain a (de-duplicated) list of txids of this transaction's missing parents.
+      @returns true if the transaction was added as a new orphan. */
+    bool AddTx(const CTransactionRef& tx, NodeId peer, const std::vector<Txid>& parent_txids) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Check if we already have an orphan transaction (by txid or wtxid) */
     bool HaveTx(const GenTxid& gtxid) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -62,6 +64,9 @@ public:
         return m_orphans.size();
     }
 
+    /** Get an orphan's parent_txids, or std::nullopt if the orphan is not present. */
+    std::optional<std::vector<Txid>> GetParentTxids(const Wtxid& wtxid) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
 protected:
     /** Guards orphan transactions */
     mutable Mutex m_mutex;
@@ -71,6 +76,8 @@ protected:
         NodeId fromPeer;
         int64_t nTimeExpire;
         size_t list_pos;
+        /** Txids of the missing parents to request. Determined by peerman. */
+        std::vector<Txid> parent_txids;
     };
 
     /** Map from txid to orphan transaction record. Limited by

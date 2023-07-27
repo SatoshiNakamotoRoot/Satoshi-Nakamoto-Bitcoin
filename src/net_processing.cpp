@@ -4174,7 +4174,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                             m_txdownloadman.ReceivedTxInv(pfrom.GetId(), gtxid, current_time);
                         }
                     }
-                    m_txdownloadman.GetOrphanageRef().AddTx(ptx, pfrom.GetId());
+                    m_txdownloadman.GetOrphanageRef().AddTx(ptx, pfrom.GetId(), unique_parents);
                     // DoS prevention: do not allow m_orphanage to grow unbounded (see CVE-2012-3789)
                     m_txdownloadman.GetOrphanageRef().LimitOrphans(m_opts.max_orphan_txs, m_rng);
                 }

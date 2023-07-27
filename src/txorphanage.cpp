@@ -17,7 +17,7 @@ static constexpr int64_t ORPHAN_TX_EXPIRE_TIME = 20 * 60;
 static constexpr int64_t ORPHAN_TX_EXPIRE_INTERVAL = 5 * 60;
 
 
-bool TxOrphanage::AddTx(const CTransactionRef& tx, NodeId peer)
+bool TxOrphanage::AddTx(const CTransactionRef& tx, NodeId peer, const std::vector<Txid>& parent_txids)
 {
     LOCK(m_mutex);
 
@@ -40,7 +40,7 @@ bool TxOrphanage::AddTx(const CTransactionRef& tx, NodeId peer)
         return false;
     }
 
-    auto ret = m_orphans.emplace(hash, OrphanTx{tx, peer, GetTime() + ORPHAN_TX_EXPIRE_TIME, m_orphan_list.size()});
+    auto ret = m_orphans.emplace(hash, OrphanTx{tx, peer, GetTime() + ORPHAN_TX_EXPIRE_TIME, m_orphan_list.size(), parent_txids});
     assert(ret.second);
     m_orphan_list.push_back(ret.first);
     // Allow for lookups in the orphan pool by wtxid, as well as txid
@@ -256,4 +256,13 @@ std::vector<CTransactionRef> TxOrphanage::GetChildren(const CTransactionRef& par
         }
     }
     return children_found;
+}
+
+std::optional<std::vector<Txid>> TxOrphanage::GetParentTxids(const Wtxid& wtxid)
+{
+    AssertLockNotHeld(m_mutex);
+    LOCK(m_mutex);
+    const auto it = m_wtxid_to_orphan_it.find(wtxid);
+    if (it != m_wtxid_to_orphan_it.end()) return it->second->second.parent_txids;
+    return std::nullopt;
 }
