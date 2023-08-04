@@ -14,6 +14,7 @@
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
 #include <test/util/setup_common.h>
+#include <txdb.h>
 #include <util/hasher.h>
 
 #include <cassert>
@@ -43,12 +44,10 @@ void initialize_coins_view()
     g_setup = testing_setup.get();
 }
 
-FUZZ_TARGET(coins_view, .init = initialize_coins_view)
+void TestCoinsView(FuzzedDataProvider& fuzzed_data_provider, CCoinsView& backend_coins_view)
 {
-    FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     bool good_data{true};
 
-    CCoinsView backend_coins_view;
     CCoinsViewCache coins_view_cache{&backend_coins_view, /*deterministic=*/true};
     COutPoint random_out_point;
     Coin random_coin;
@@ -289,4 +288,11 @@ FUZZ_TARGET(coins_view, .init = initialize_coins_view)
                 (void)IsWitnessStandard(CTransaction{random_mutable_transaction}, coins_view_cache);
             });
     }
+}
+
+FUZZ_TARGET(coins_view, .init = initialize_coins_view)
+{
+    FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
+    CCoinsView backend_coins_view;
+    TestCoinsView(fuzzed_data_provider, backend_coins_view);
 }
