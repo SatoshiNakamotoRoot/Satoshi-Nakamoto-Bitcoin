@@ -562,15 +562,15 @@ private:
     /** Handle a transaction whose result was MempoolAcceptResult::ResultType::INVALID.
      * @returns true if this transaction is an orphan we should try to resolve. */
     node::InvalidTxTask ProcessInvalidTx(const CTransactionRef& tx, NodeId nodeid, const TxValidationState& state)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, m_tx_download_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex);
 
     /** Handle a transaction whose result was MempoolAcceptResult::ResultType::VALID. */
     void ProcessValidTx(const CTransactionRef& tx, NodeId nodeid, const std::list<CTransactionRef>& replaced_transactions)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, m_tx_download_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex);
 
     /** Handle package of transactions. */
     void ProcessPackageResult(const Package& package, const PackageMempoolAcceptResult& result, NodeId nodeid)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, m_tx_download_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, !m_tx_download_mutex);
 
     /**
      * Reconsider orphan transactions after a parent has been accepted to the mempool.
@@ -1524,8 +1524,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         }
     }
     {
-        LOCK(m_tx_download_mutex);
-        m_txdownloadman.DisconnectedPeer(nodeid);
+        WITH_LOCK(m_tx_download_mutex, m_txdownloadman.DisconnectedPeer(nodeid));
     }
     if (m_txreconciliation) m_txreconciliation->ForgetPeer(nodeid);
     m_num_preferred_download_peers -= state->fPreferredDownload;
@@ -2869,7 +2868,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
 
 node::InvalidTxTask PeerManagerImpl::ProcessInvalidTx(const CTransactionRef& tx, NodeId nodeid, const TxValidationState& state)
 {
-    AssertLockHeld(m_tx_download_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
     AssertLockNotHeld(m_peer_mutex);
     LogPrint(BCLog::MEMPOOLREJ, "%s (wtxid=%s) from peer=%d was not accepted: %s\n",
              tx->GetHash().ToString(),
@@ -2879,6 +2878,7 @@ node::InvalidTxTask PeerManagerImpl::ProcessInvalidTx(const CTransactionRef& tx,
     // Maybe punish peer that gave us an tx
     MaybePunishNodeForTx(nodeid, state);
 
+    LOCK(m_tx_download_mutex);
     return m_txdownloadman.MempoolRejectedTx(tx, state.GetResult());
 }
 
@@ -2886,13 +2886,13 @@ void PeerManagerImpl::ProcessValidTx(const CTransactionRef& tx, NodeId nodeid, c
 {
     AssertLockNotHeld(m_peer_mutex);
     AssertLockHeld(g_msgproc_mutex);
-    AssertLockHeld(m_tx_download_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
     LogPrint(BCLog::MEMPOOL, "AcceptToMemoryPool: peer=%d: accepted %s (wtxid=%s) (poolsz %u txn, %u kB)\n",
              nodeid,
              tx->GetHash().ToString(),
              tx->GetWitnessHash().ToString(),
              m_mempool.size(), m_mempool.DynamicMemoryUsage() / 1000);
-    m_txdownloadman.MempoolAcceptedTx(tx);
+    WITH_LOCK(m_tx_download_mutex, m_txdownloadman.MempoolAcceptedTx(tx));
 
     RelayTransaction(tx->GetHash(), tx->GetWitnessHash());
 
@@ -2905,10 +2905,10 @@ void PeerManagerImpl::ProcessPackageResult(const Package& package, const Package
 {
     AssertLockNotHeld(m_peer_mutex);
     AssertLockHeld(g_msgproc_mutex);
-    AssertLockHeld(m_tx_download_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
 
     if (result.m_state.IsInvalid()) {
-        m_txdownloadman.MempoolRejectedPackage(GetPackageHash(package));
+        WITH_LOCK(m_tx_download_mutex, m_txdownloadman.MempoolRejectedPackage(GetPackageHash(package)));
     }
 
     // Iterate backwards to erase in-package descendants from the orphanage before they become
@@ -2928,7 +2928,8 @@ void PeerManagerImpl::ProcessPackageResult(const Package& package, const Package
                 {
                     ProcessInvalidTx(tx, nodeid, tx_result.m_state);
                     if (tx_result.m_wtxids_fee_calculations.has_value()) {
-                        m_txdownloadman.MempoolRejectedPackage(GetCombinedHash(tx_result.m_wtxids_fee_calculations.value()));
+                        WITH_LOCK(m_tx_download_mutex,
+                            m_txdownloadman.MempoolRejectedPackage(GetCombinedHash(tx_result.m_wtxids_fee_calculations.value())));
                     }
                     break;
                 }
@@ -2945,11 +2946,12 @@ void PeerManagerImpl::ProcessPackageResult(const Package& package, const Package
 bool PeerManagerImpl::ProcessOrphanTx(Peer& peer)
 {
     AssertLockHeld(g_msgproc_mutex);
-    LOCK2(::cs_main, m_tx_download_mutex);
+    AssertLockNotHeld(m_tx_download_mutex);
+    LOCK(::cs_main);
 
     CTransactionRef porphanTx = nullptr;
 
-    while (CTransactionRef porphanTx = m_txdownloadman.GetTxToReconsider(peer.m_id)) {
+    while (CTransactionRef porphanTx = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetTxToReconsider(peer.m_id))) {
         const MempoolAcceptResult result = m_chainman.ProcessTransaction(porphanTx);
         const TxValidationState& state = result.m_state;
         const Txid& orphanHash = porphanTx->GetHash();
@@ -3523,13 +3525,13 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 return tx_relay->m_tx_inventory_to_send.empty() &&
                        tx_relay->m_next_inv_send_time == 0s));
 
-            LOCK2(::cs_main, m_tx_download_mutex);
+            LOCK(::cs_main);
             const CNodeState* state = State(pfrom.GetId());
-            m_txdownloadman.ConnectedPeer(pfrom.GetId(), node::TxDownloadConnectionInfo {
+            WITH_LOCK(m_tx_download_mutex, m_txdownloadman.ConnectedPeer(pfrom.GetId(), node::TxDownloadConnectionInfo {
                 .m_preferred = state->fPreferredDownload,
                 .m_relay_permissions = pfrom.HasPermission(NetPermissionFlags::Relay),
                 .m_wtxid_relay = peer->m_wtxid_relay,
-            });
+            }));
 
         }
 
@@ -3764,7 +3766,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         const bool reject_tx_invs{RejectIncomingTxs(pfrom)};
 
-        LOCK2(cs_main, m_tx_download_mutex);
+        LOCK(cs_main);
 
         const auto current_time{GetTime<std::chrono::microseconds>()};
         uint256* best_block{nullptr};
@@ -3802,11 +3804,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     return;
                 }
                 const GenTxid gtxid = ToGenTxid(inv);
-                const bool fAlreadyHave = m_txdownloadman.AlreadyHaveTx(gtxid);
+                const bool fAlreadyHave = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.AlreadyHaveTx(gtxid));
                 LogPrint(BCLog::NET, "got inv: %s  %s peer=%d\n", inv.ToString(), fAlreadyHave ? "have" : "new", pfrom.GetId());
 
                 AddKnownTx(*peer, inv.hash);
                 if (!m_chainman.IsInitialBlockDownload()) {
+                    LOCK(m_tx_download_mutex);
                     m_txdownloadman.ReceivedTxInv(pfrom.GetId(), gtxid, current_time);
                 }
             } else {
@@ -4090,7 +4093,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         const uint256& hash = peer->m_wtxid_relay ? wtxid : txid;
         AddKnownTx(*peer, hash);
 
-        LOCK2(cs_main, m_tx_download_mutex);
+        LOCK(cs_main);
 
         // We do the AlreadyHaveTx() check using wtxid, rather than txid - in the
         // absence of witness malleation, this is strictly better, because the
@@ -4104,7 +4107,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // already; and an adversary can already relay us old transactions
         // (older than our recency filter) if trying to DoS us, without any need
         // for witness malleation.
-        std::optional<node::InvalidTxTask> next_task = m_txdownloadman.ReceivedTx(pfrom.GetId(), ptx);
+        std::optional<node::InvalidTxTask> next_task = WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.ReceivedTx(pfrom.GetId(), ptx));
         if (next_task.has_value() && *next_task == node::InvalidTxTask::NONE) {
             if (pfrom.HasPermission(NetPermissionFlags::ForceRelay)) {
                 // Always relay transactions received from peers with forcerelay
@@ -4146,7 +4149,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 next_task = ProcessInvalidTx(ptx, pfrom.GetId(), state);
                 if (*next_task == node::InvalidTxTask::ADD_ORPHAN) {
                     const auto current_time{GetTime<std::chrono::microseconds>()};
-                    const auto& [added_new_orphan, unique_parents] = m_txdownloadman.NewOrphanTx(ptx, pfrom.GetId(), current_time);
+                    const auto& [added_new_orphan, unique_parents] = WITH_LOCK(m_tx_download_mutex,
+                        return m_txdownloadman.NewOrphanTx(ptx, pfrom.GetId(), current_time));
                     if (added_new_orphan) {
                         AddToCompactExtraTransactions(ptx);
                         for (const uint256& parent_txid : unique_parents) {
@@ -4162,7 +4166,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (next_task.has_value() && *next_task == node::InvalidTxTask::TRY_CPFP) {
             LogPrint(BCLog::TXPACKAGES, "found tx %s (wtxid=%s) in reconsiderable rejects, looking for child in orphanage\n",
                      txid.ToString(), wtxid.ToString());
-            if (auto maybe_cpfp_package{m_txdownloadman.MaybeGet1p1cPackage(ptx, pfrom.GetId())}) {
+            if (auto maybe_cpfp_package{WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.MaybeGet1p1cPackage(ptx, pfrom.GetId()))}) {
                 const auto& tx_orphan = maybe_cpfp_package->back();
                 LogPrint(BCLog::TXPACKAGES, "found child %s (wtxid=%s) of tx %s (wtxid=%s) in orphanage, trying package evaluation\n",
                          tx_orphan->GetHash().ToString(), tx_orphan->GetWitnessHash().ToString(), txid.ToString(), wtxid.ToString());
@@ -4883,8 +4887,7 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         //  by another peer that was already processed; in that case,
         //  the extra work may not be noticed, possibly resulting in an
         //  unnecessary 100ms delay)
-        LOCK(m_tx_download_mutex);
-        if (m_txdownloadman.HaveMoreWork(peer->m_id)) fMoreWork = true;
+        if (WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.HaveMoreWork(peer->m_id))) fMoreWork = true;
     } catch (const std::exception& e) {
         LogPrint(BCLog::NET, "%s(%s, %u bytes): Exception '%s' (%s) caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size, e.what(), typeid(e).name());
     } catch (...) {
@@ -5765,8 +5768,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         // Message: getdata (transactions)
         //
-        LOCK(m_tx_download_mutex);
-        for (const GenTxid& gtxid : m_txdownloadman.GetRequestsToSend(pto->GetId(), current_time)) {
+        for (const GenTxid& gtxid : WITH_LOCK(m_tx_download_mutex, return m_txdownloadman.GetRequestsToSend(pto->GetId(), current_time))) {
             vGetData.emplace_back(gtxid.IsWtxid() ? MSG_WTX : (MSG_TX | GetFetchFlags(*peer)), gtxid.GetHash());
             if (vGetData.size() >= MAX_GETDATA_SZ) {
                 MakeAndPushMessage(*pto, NetMsgType::GETDATA, vGetData);
