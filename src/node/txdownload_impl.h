@@ -59,11 +59,12 @@ enum class InvalidTxTask : uint8_t {
 class TxDownloadImpl {
 public:
     TxDownloadOptions m_opts;
+    mutable Mutex m_tx_download_mutex;
 
     /** Manages unvalidated tx data (orphan transactions for which we are downloading ancestors). */
-    TxOrphanage m_orphanage;
+    TxOrphanage m_orphanage GUARDED_BY(m_tx_download_mutex);
     /** Tracks candidates for requesting and downloading transaction data. */
-    TxRequestTracker m_txrequest;
+    TxRequestTracker m_txrequest GUARDED_BY(m_tx_download_mutex);
 
     /**
      * Filter for transactions that were recently rejected by the mempool.
@@ -99,7 +100,7 @@ public:
      *
      * Memory used: 1.3 MB
      */
-    CRollingBloomFilter m_recent_rejects{120'000, 0.000'001};
+    CRollingBloomFilter m_recent_rejects GUARDED_BY(m_tx_download_mutex){120'000, 0.000'001};
 
     /**
      * Filter for the wtxids of transactions that were recently rejected by the mempool but are
@@ -116,7 +117,7 @@ public:
      * Parameters are picked to be the same false positive rate but half the capacity as
      * m_recent_rejects.
      */
-    CRollingBloomFilter m_recent_rejects_reconsiderable{60'000, 0.000'001};
+    CRollingBloomFilter m_recent_rejects_reconsiderable GUARDED_BY(m_tx_download_mutex){60'000, 0.000'001};
 
     /*
      * Filter for transactions that have been recently confirmed.
@@ -133,8 +134,7 @@ public:
      * transaction per day that would be inadvertently ignored (which is the
      * same probability that we have in the reject filter).
      */
-    mutable Mutex m_recent_confirmed_transactions_mutex;
-    CRollingBloomFilter m_recent_confirmed_transactions GUARDED_BY(m_recent_confirmed_transactions_mutex){48'000, 0.000'001};
+    CRollingBloomFilter m_recent_confirmed_transactions GUARDED_BY(m_tx_download_mutex){48'000, 0.000'001};
 
     struct PeerInfo {
         /** Information relevant to scheduling tx requests. */
@@ -145,85 +145,106 @@ public:
 
     /** Information for all of the peers we may download transactions from. This is not necessarily
      * all peers we are connected to (no block-relay-only and temporary connections). */
-    std::map<NodeId, PeerInfo> m_peer_info;
+    std::map<NodeId, PeerInfo> m_peer_info GUARDED_BY(m_tx_download_mutex);
 
     /** Number of wtxid relay peers we have. */
-    uint32_t m_num_wtxid_peers{0};
+    uint32_t m_num_wtxid_peers GUARDED_BY(m_tx_download_mutex){0};
 
+private:
+    /** Maybe adds an inv to txrequest. */
+    void AddTxAnnouncement(NodeId peer, const GenTxid& gtxid, std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(m_tx_download_mutex);
+
+    /** Internal AlreadyHaveTx. */
+    bool AlreadyHaveTxLocked(const GenTxid& gtxid, bool include_reconsiderable) const
+        EXCLUSIVE_LOCKS_REQUIRED(m_tx_download_mutex);
+
+public:
     TxDownloadImpl(const TxDownloadOptions& options) : m_opts{options} {}
 
-    TxOrphanage& GetOrphanageRef();
+    TxOrphanage& GetOrphanageRef() EXCLUSIVE_LOCKS_REQUIRED(m_tx_download_mutex);
 
-    TxRequestTracker& GetTxRequestRef();
+    TxRequestTracker& GetTxRequestRef() EXCLUSIVE_LOCKS_REQUIRED(m_tx_download_mutex);
 
     /** Creates a new PeerInfo. Saves the connection info to calculate tx announcement delays later. */
-    void ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info);
+    void ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Deletes all txrequest announcements and orphans for a given peer. */
-    void DisconnectedPeer(NodeId nodeid);
+    void DisconnectedPeer(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Resets m_recent_rejects. */
-    void UpdatedBlockTipSync();
+    void UpdatedBlockTipSync() EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Deletes all block and conflicted transactions from txrequest and orphanage. */
-    void BlockConnected(const CBlock& block, const uint256& tiphash);
+    void BlockConnected(const CBlock& block, const uint256& tiphash)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Resets recently confirmed filter. */
-    void BlockDisconnected();
+    void BlockDisconnected() EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Erases the tx from orphanage, and forgets its txid and wtxid from txrequest.  Adds any
      * orphan transactions depending on it to their respective peers' workset. */
-    void MempoolAcceptedTx(const CTransactionRef& tx);
+    void MempoolAcceptedTx(const CTransactionRef& tx) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** May add the transaction's txid and/or wtxid to recent_rejects depending on the rejection
      * result. Returns true if this transaction is an orphan who should be processed, false
      * otherwise. */
-    InvalidTxTask MempoolRejectedTx(const CTransactionRef& tx, const TxValidationResult& result);
+    InvalidTxTask MempoolRejectedTx(const CTransactionRef& tx, const TxValidationResult& result)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Records the packagehash in m_recent_rejects_reconsiderable. */
-    void MempoolRejectedPackage(const uint256& packagehash);
+    void MempoolRejectedPackage(const uint256& packagehash)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Whether this transaction is found in orphanage, recently confirmed, or recently rejected transactions. */
-    bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable) const;
+    bool AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Gets all orphans descending from tx_parent, shuffles them, and returns the first 1p1c
      * package that isn't found in m_recent_rejects_reconsiderable. If none exist, returns
      * std::nullopt. */
-    std::optional<Package> MaybeGet1p1cPackage(const CTransactionRef& tx_parent, NodeId nodeid) const;
+    std::optional<Package> MaybeGet1p1cPackage(const CTransactionRef& tx_parent, NodeId nodeid) const
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** New inv has been received. May be added as a candidate to txrequest. */
-    void ReceivedTxInv(NodeId peer, const GenTxid& gtxid, std::chrono::microseconds now);
+    void ReceivedTxInv(NodeId peer, const GenTxid& gtxid, std::chrono::microseconds now)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Get getdata requests to send. */
-    std::vector<GenTxid> GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time);
+    std::vector<GenTxid> GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Marks a tx as ReceivedResponse in txrequest. If the transaction should be validated, returns
      * std::nullopt. If we already have the tx (not reconsiderable), returns InvalidTxTask::NONE to
      * instruct the caller to drop. If the tx is in m_recent_rejects_reconsiderable, return
      * InvalidTxTask::TRY_CPFP to let the caller know to use MaybeGet1p1cPackage instead of
      * submitting the tx by itself. */
-    std::optional<InvalidTxTask> ReceivedTx(NodeId nodeid, const CTransactionRef& ptx);
+    std::optional<InvalidTxTask> ReceivedTx(NodeId nodeid, const CTransactionRef& ptx)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Marks a tx as ReceivedResponse in txrequest. */
-    void ReceivedNotFound(NodeId nodeid, const std::vector<uint256>& txhashes);
+    void ReceivedNotFound(NodeId nodeid, const std::vector<uint256>& txhashes)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Creates deduplicated list of missing parents (based on AlreadyHaveTx). Adds tx to orphanage
      * and schedules requests for missing parents in txrequest. Returns whether the tx is new to the
      * orphanage and staying there. */
     std::pair<bool, std::vector<Txid>> NewOrphanTx(const CTransactionRef& tx, NodeId nodeid,
-                                                   std::chrono::microseconds current_time);
+                                                   std::chrono::microseconds current_time)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Whether there are any orphans in this peer's work set. */
-    bool HaveMoreWork(NodeId nodeid) const;
+    bool HaveMoreWork(NodeId nodeid) const EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Get orphan transaction from this peer's workset. */
-    CTransactionRef GetTxToReconsider(NodeId nodeid);
+    CTransactionRef GetTxToReconsider(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Size() of orphanage, txrequest, and orphan request tracker are equal to 0. */
-    void CheckIsEmpty() const;
+    void CheckIsEmpty() const EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 
     /** Count(nodeid) of orphanage, txrequest, and orphan request tracker are equal to 0. */
-    void CheckIsEmpty(NodeId nodeid) const;
+    void CheckIsEmpty(NodeId nodeid) const EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
 };
 } // namespace node
 #endif // BITCOIN_NODE_TXDOWNLOAD_IMPL_H
