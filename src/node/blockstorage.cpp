@@ -19,6 +19,7 @@
 #include <util/batchpriority.h>
 #include <util/fs.h>
 #include <util/signalinterrupt.h>
+#include <util/trace.h>
 #include <validation.h>
 
 #include <map>
@@ -767,13 +768,14 @@ bool BlockManager::ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos) cons
     block.SetNull();
 
     // Open history file to read
-    CAutoFile filein(OpenBlockFile(pos, true), SER_DISK, CLIENT_VERSION);
+    CBufferedFile filein(OpenBlockFile(pos, true), 1024, 0, SER_DISK, CLIENT_VERSION);
     if (filein.IsNull()) {
         return error("ReadBlockFromDisk: OpenBlockFile failed for %s", pos.ToString());
     }
 
     // Read block
     try {
+        TRACE_RAII(block_manager, read_block_from_disk_unserialize);
         filein >> block;
     } catch (const std::exception& e) {
         return error("%s: Deserialize or I/O error - %s at %s", __func__, e.what(), pos.ToString());
