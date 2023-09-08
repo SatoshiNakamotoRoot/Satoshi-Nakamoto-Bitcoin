@@ -19,6 +19,9 @@
 #include <string>
 #include <vector>
 
+extern const char* pszBase58;
+extern const int8_t mapBase58[256];
+
 /**
  * Encode a byte span as a base58-encoded string
  */

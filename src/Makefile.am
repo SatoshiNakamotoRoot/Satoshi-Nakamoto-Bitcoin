@@ -289,6 +289,7 @@ BITCOIN_CORE_H = \
   undo.h \
   util/any.h \
   util/asmap.h \
+  util/base58_address.h \
   util/batchpriority.h \
   util/bip32.h \
   util/bitdeque.h \
@@ -728,6 +729,7 @@ libbitcoin_util_a_SOURCES = \
   support/cleanse.cpp \
   sync.cpp \
   util/asmap.cpp \
+  util/base58_address.cpp \
   util/batchpriority.cpp \
   util/bip32.cpp \
   util/bytevectorhash.cpp \
