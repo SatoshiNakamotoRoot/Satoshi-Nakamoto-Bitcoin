@@ -12,7 +12,7 @@
  *
  * @param[in] length length of pre-encoded base58 data
  * @param[in] version_byte The address version byte
- * @param[out] The possible range of base58 prefixes (eg. ['m','n'])
+ * @return The possible range of base58 prefixes (eg. ['m','n'])
  * @code
  * std::vector result = Base58PrefixesFromVersionByte(31,0x05);
  * // result will be ['3']
