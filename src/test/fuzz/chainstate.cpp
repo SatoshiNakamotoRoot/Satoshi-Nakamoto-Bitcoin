@@ -5,8 +5,10 @@
 #include <chain.h>
 #include <chainparams.h>
 #include <consensus/merkle.h>
+#include <kernel/notifications_interface.h>
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
+#include <node/miner.h>
 #include <pow.h>
 #include <scheduler.h>
 #include <undo.h>
@@ -22,6 +24,7 @@
 #include <util/fs_helpers.h>
 #include <util/thread.h>
 
+
 namespace {
 
 const BasicTestingSetup* g_setup;
@@ -32,18 +35,22 @@ public:
     kernel::InterruptResult blockTip(SynchronizationState, CBlockIndex&) override { return {}; }
     void headerTip(SynchronizationState, int64_t height, int64_t timestamp, bool presync) override {}
     void progress(const bilingual_str& title, int progress_percent, bool resume_possible) override {}
-    void warning(const bilingual_str& warning) override {}
-    void flushError(const std::string& debug_message) override
+    virtual void warningSet(kernel::Warning id, const bilingual_str& message) override {}
+    virtual void warningUnset(kernel::Warning id) override {}
+    void flushError(const bilingual_str& debug_message) override
     {
         assert(false);
     }
-    void fatalError(const std::string& debug_message, const bilingual_str& user_message) override
+    void fatalError(const bilingual_str& message) override
     {
         assert(false);
     }
 };
 
 auto g_notifications{KernelNotifications()};
+
+//! See net_processing.
+static const int MAX_HEADERS_RESULTS{2000};
 
 // We use a mapping from file path to buffer as a boutique in-memory file system. Note it's
 // fine because we only ever use unique pathnames for block files, but it may cause issues if
@@ -52,6 +59,9 @@ auto g_notifications{KernelNotifications()};
 // The use of a global does not prevent determinism (since the buffer from one run simply gets
 // overwritten in the next) but avoids a 128MB allocation per run. FIXME: is that really true?
 std::unordered_map<fs::path, std::vector<unsigned char>, std::hash<std::filesystem::path>> g_files;
+
+//! The initial block chain used to test the chainstate.
+std::vector<std::shared_ptr<CBlock>> g_initial_blockchain;
 
 void mock_filesystem_calls()
 {
@@ -152,6 +162,43 @@ CTransactionRef CreateCoinbase(int height)
     return MakeTransactionRef(std::move(tx));
 }
 
+/** Create a transaction spending a random amount of utxos from the provided set. Must not be empty. */
+CTransactionRef CreateTransaction(FuzzedDataProvider& prov, std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher>& utxos)
+{
+    assert(!utxos.empty());
+    CMutableTransaction tx;
+
+    const auto input_count{prov.ConsumeIntegralInRange(1, std::min((int)utxos.size(), 1'000))};
+    tx.vin.resize(input_count);
+    CAmount in_value{0};
+    auto it{utxos.begin()};
+    for (int i{0}; i < input_count; ++i) {
+        auto [outpoint, coin] = *it++;
+        in_value += coin.nValue;
+        tx.vin[i].prevout = outpoint;
+        tx.vin[i].scriptWitness.stack = std::vector<std::vector<uint8_t>>{WITNESS_STACK_ELEM_OP_TRUE};
+        utxos.erase(outpoint);
+    }
+
+    const auto out_count{prov.ConsumeIntegralInRange(1, 1'000)};
+    tx.vout.resize(out_count);
+    for (int i{0}; i < out_count; ++i) {
+        tx.vout[i].scriptPubKey = P2WSH_OP_TRUE;
+        tx.vout[i].nValue = in_value / out_count;
+    }
+
+    // Add the coins created in this transaction to the set, for them to be spent by the next
+    // ones or in future blocks.
+    const auto txid{tx.GetHash()};
+    for (int i{0}; i < out_count; ++i) {
+        COutPoint outpoint{txid, static_cast<unsigned>(i)};
+        CTxOut txo{in_value / out_count, P2WSH_OP_TRUE};
+        utxos.emplace(std::move(outpoint), std::move(txo));
+    }
+
+    return MakeTransactionRef(std::move(tx));
+}
+
 /** Create a random block and include random (and most likely invalid) transactions. */
 std::pair<CBlock, int> CreateBlock(FuzzedDataProvider& prov, std::pair<uint256, int> prev_block)
 {
@@ -170,6 +217,41 @@ std::pair<CBlock, int> CreateBlock(FuzzedDataProvider& prov, std::pair<uint256, 
     return std::make_pair(std::move(block), height);
 }
 
+/** Create a consensus-valid random block.
+ * If a non-empty list of transactions is passed include them. Otherwise create some random valid transactions
+ * from the given utxos. Spent utxos will be erased from the map and created ones will be included. */
+CBlock CreateValidBlock(FuzzedDataProvider& prov, const Consensus::Params& params, CBlockIndex* prev_block,
+                        std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher>& utxos, std::vector<CTransactionRef> txs = {})
+{
+    assert(prev_block);
+    CBlock block;
+    block.nVersion = prov.ConsumeIntegral<int32_t>();
+    block.nNonce = prov.ConsumeIntegral<uint32_t>();
+    node::UpdateTime(&block, params, prev_block);
+    block.nBits = GetNextWorkRequired(prev_block, &block, params);
+    block.hashPrevBlock = prev_block->GetBlockHash();
+
+    // Always create the coinbase. Then if a list of transactions was passed, use that. Otherwise
+    // try to create a bunch of new transactions.
+    block.vtx.push_back(CreateCoinbase(prev_block->nHeight + 1));
+    if (!txs.empty()) {
+        block.vtx.reserve(txs.size());
+        block.vtx.insert(block.vtx.end(), std::make_move_iterator(txs.begin()), std::make_move_iterator(txs.end()));
+        txs.erase(txs.begin(), txs.end());
+    } else {
+        while (prov.ConsumeBool() && !utxos.empty()) {
+            block.vtx.push_back(CreateTransaction(prov, utxos));
+            if (GetBlockWeight(block) > MAX_BLOCK_WEIGHT) {
+                block.vtx.pop_back();
+                break;
+            }
+        }
+    }
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+
+    return block;
+}
+
 /** Make it possible to sanity check roundtrips to disk. */
 bool operator==(const CBlock& a, const CBlock& b)
 {
@@ -179,6 +261,24 @@ bool operator==(const CBlock& a, const CBlock& b)
         && a.nNonce == b.nNonce
         && a.hashPrevBlock == b.hashPrevBlock
         && a.hashMerkleRoot == b.hashMerkleRoot;
+}
+
+/** Add spendable utxos to our cache from the coins database. */
+void AppendUtxos(ChainstateManager& chainman, std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher>& utxos)
+{
+    LOCK(cs_main);
+    chainman.ActiveChainstate().CoinsTip().Sync();
+
+    const auto& coins{chainman.ActiveChainstate().CoinsDB()};
+    const auto cur_height{chainman.ActiveHeight()};
+    for (auto cursor{coins.Cursor()}; cursor->Valid(); cursor->Next()) {
+        COutPoint outpoint;
+        Coin coin;
+        assert(cursor->GetValue(coin));
+        if (coin.IsSpent() || (coin.IsCoinBase() && cur_height - coin.nHeight < COINBASE_MATURITY)) continue;
+        assert(cursor->GetKey(outpoint));
+        utxos.emplace(std::move(outpoint), std::move(coin.out));
+    }
 }
 
 } // namespace
@@ -334,4 +434,219 @@ FUZZ_TARGET(blockstorage, .init = init_blockstorage)
 
     // At no point do we set an AssumeUtxo snapshot.
     assert(!blockman.m_snapshot_height);
+}
+
+void init_chainstate()
+{
+    static const auto testing_setup = MakeNoLogFileContext<>(ChainType::MAIN);
+    g_setup = testing_setup.get();
+
+    mock_filesystem_calls();
+
+    // Make the pow check always pass to be able to mine a chain from inside the target.
+    // TODO: we could have two mocks, once which passes, the other which fails. This way we can
+    // also fuzz the codepath for invalid pow.
+    g_check_pow_mock = [](uint256 hash, unsigned int, const Consensus::Params&) {
+        return true;
+    };
+
+    // Get 10 spendable UTxOs.
+    g_initial_blockchain = CreateBlockChain(110, Params());
+}
+
+FUZZ_TARGET(chainstate, .init = init_chainstate)
+{
+    FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
+    const auto& chainparams{Params()};
+    const fs::path datadir{""};
+    std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher> utxos;
+
+    CScheduler scheduler;
+    GetMainSignals().RegisterBackgroundSignalScheduler(scheduler);
+    scheduler.m_service_thread = std::thread(util::TraceThread, "scheduler", [&] { scheduler.serviceQueue(); });
+
+    // Create the chainstate..
+    uint64_t prune_target{0};
+    if (fuzzed_data_provider.ConsumeBool()) {
+        prune_target = fuzzed_data_provider.ConsumeIntegral<uint64_t>();
+    }
+    node::BlockManager::Options blockman_opts{
+        .chainparams = chainparams,
+        .prune_target = prune_target,
+        .blocks_dir = datadir / "blocks",
+        .notifications = g_notifications,
+    };
+    const ChainstateManager::Options chainman_opts{
+        .chainparams = chainparams,
+        .datadir = "",
+        // TODO: make it possible to call CheckBlockIndex() without having set it here, call it in CallOneOf().
+        .check_block_index = true,
+        .checkpoints_enabled = false,
+        .minimum_chain_work = UintToArith256(uint256{}),
+        .assumed_valid_block = uint256{},
+        .notifications = g_notifications,
+    };
+    ChainstateManager chainman{*g_setup->m_node.shutdown, chainman_opts, blockman_opts};
+
+    // ..And then load it.
+    node::CacheSizes cache_sizes;
+    cache_sizes.block_tree_db = 2 << 20;
+    cache_sizes.coins_db = 2 << 22;
+    cache_sizes.coins = (450 << 20) - (2 << 20) - (2 << 22);
+    node::ChainstateLoadOptions load_opts {
+        .block_tree_db_in_memory = true,
+        .coins_db_in_memory = true,
+        .prune = prune_target > 0,
+        .require_full_verification = false,
+    };
+    auto [status, _] = node::LoadChainstate(chainman, cache_sizes, load_opts);
+    assert(status == node::ChainstateLoadStatus::SUCCESS);
+
+    // Activate the initial chain.
+    BlockValidationState dummy_valstate;
+    for (Chainstate* chainstate : chainman.GetAll()) {
+        assert(chainstate->ActivateBestChain(dummy_valstate, nullptr));
+    }
+    for (const auto& block : g_initial_blockchain) {
+        bool new_block{false};
+        assert(chainman.ProcessNewBlock(block, true, true, &new_block));
+        assert(new_block);
+    }
+
+    std::vector<CBlock> blocks_in_flight;
+    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10'000) {
+        // Every so often, update our cache used to create non-coinbase txs.
+        if (_count % 100 == 0) AppendUtxos(chainman, utxos);
+
+        CallOneOf(fuzzed_data_provider,
+            // Process a list of headers. Most of the time make it process the header of a valid block
+            // cached for future processing.
+            [&]() NO_THREAD_SAFETY_ANALYSIS {
+                LOCK(cs_main);
+                std::vector<CBlockHeader> headers;
+
+                // In 1% of the cases, generate a random list of headers to be processed. Otherwise, create a single
+                // valid block.
+                // TODO: make it possible to generate a chain of more than one valid block.
+                const bool is_random{fuzzed_data_provider.ConsumeIntegralInRange(0, 99) == 99};
+                const int headers_count{is_random ? fuzzed_data_provider.ConsumeIntegralInRange(1, MAX_HEADERS_RESULTS) : 1};
+                headers.reserve(headers_count);
+
+                if (is_random) {
+                    for (int i = 0; i < headers_count; ++i) {
+                        headers.push_back(CreateBlockHeader(fuzzed_data_provider, RandomPrevBlock(fuzzed_data_provider), /*set_merkle=*/true).first);
+                    }
+                } else {
+                    // In 10% of the cases branch off a random header.
+                    const bool extend_tip{fuzzed_data_provider.ConsumeIntegralInRange<int>(0, 9) > 0};
+                    // The unspent coins to be used to create transactions beside the coinbase in the block to be created.
+                    std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher> empty_utxos;
+                    auto& coins{extend_tip ? utxos : empty_utxos};
+                    CBlockIndex* prev_block{[&]() NO_THREAD_SAFETY_ANALYSIS {
+                        // Sometimes extend the best validated chain, sometimes the best header chain.
+                        if (extend_tip) {
+                            return fuzzed_data_provider.ConsumeBool() ? chainman.ActiveTip() : chainman.m_best_header;
+                        }
+                        return &PickValue(fuzzed_data_provider, chainman.m_blockman.m_block_index).second;
+                    }()};
+                    blocks_in_flight.push_back(CreateValidBlock(fuzzed_data_provider, chainparams.GetConsensus(), prev_block, coins));
+                    headers.emplace_back(blocks_in_flight.back());
+                }
+
+                const bool min_pow_checked{fuzzed_data_provider.ConsumeBool()};
+                const bool res{chainman.ProcessNewBlockHeaders(headers, min_pow_checked, dummy_valstate)};
+                assert(res || is_random || !min_pow_checked);
+            },
+            // Process a block. Most of the time make it proces one of the blocks in flight.
+            [&]() NO_THREAD_SAFETY_ANALYSIS {
+                const bool process_in_flight{!blocks_in_flight.empty() && fuzzed_data_provider.ConsumeIntegralInRange<int>(0, 9) > 0};
+                auto block{[&] {
+                    if (process_in_flight) {
+                        // In 90% of the cases, process a block of which we processed the header already. Note the block
+                        // isn't necessarily valid.
+                        auto block{std::move(blocks_in_flight.back())};
+                        blocks_in_flight.pop_back();
+                        return block;
+                    } else {
+                        // In the rest, sometimes create a new valid block building on top of either our validated chain
+                        // tip or the header chain tip.
+                        if (fuzzed_data_provider.ConsumeBool()) {
+                            const auto prev_block{WITH_LOCK(cs_main, return fuzzed_data_provider.ConsumeBool() ? chainman.ActiveTip() : chainman.m_best_header)};
+                            return CreateValidBlock(fuzzed_data_provider, chainparams.GetConsensus(), prev_block, utxos);
+                        } else {
+                            // For invalid blocks create sometimes an otherwise valid block which branches from any header,
+                            // and sometimes a completely random block.
+                            if (fuzzed_data_provider.ConsumeBool()) {
+                                std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher> empty_utxos;
+                                const auto prev_block{WITH_LOCK(cs_main, return &PickValue(fuzzed_data_provider, chainman.m_blockman.m_block_index).second)};
+                                return CreateValidBlock(fuzzed_data_provider, chainparams.GetConsensus(), prev_block, empty_utxos);
+                            } else {
+                                LOCK(cs_main);
+                                return CreateBlock(fuzzed_data_provider, RandomPrevBlock(fuzzed_data_provider)).first;
+                            }
+                        }
+                    }
+                }()};
+                const bool force_processing{fuzzed_data_provider.ConsumeBool()};
+                const bool min_pow_checked{fuzzed_data_provider.ConsumeBool()};
+                chainman.ProcessNewBlock(std::make_shared<CBlock>(std::move(block)), force_processing, min_pow_checked, /*new_block=*/nullptr);
+            },
+            // Create a reorg of any size.
+            [&]() NO_THREAD_SAFETY_ANALYSIS {
+                const auto cur_height{WITH_LOCK(cs_main, return chainman.ActiveHeight())};
+                if (cur_height <= 0) return;
+
+                // Our cache will be invalidated by the reorg.
+                utxos.clear();
+
+                // Pick the depth of the reorg, and sometimes record the unconfirmed transactions to re-confirm them.
+                const auto reorg_height{fuzzed_data_provider.ConsumeIntegralInRange(1, cur_height)};
+                std::vector<CBlock> disconnected_blocks;
+                if (fuzzed_data_provider.ConsumeBool()) {
+                    disconnected_blocks.resize(cur_height - reorg_height);
+                }
+
+                // Get a pointer to the first block in common between the current and the new chain, optionally
+                // recording the disconnected transactions as we go.
+                auto ancestor{WITH_LOCK(cs_main, return chainman.ActiveTip())};
+                while (ancestor->nHeight >= reorg_height) {
+                    if (!disconnected_blocks.empty() && (ancestor->nHeight > reorg_height)) {
+                        const auto idx{ancestor->nHeight - reorg_height - 1};
+                        assert(chainman.m_blockman.ReadBlockFromDisk(disconnected_blocks[idx], *ancestor));
+                    }
+                    ancestor = ancestor->pprev;
+                }
+
+                // Create a chain as long, don't connect it yet.
+                {
+                LOCK(cs_main);
+                for (int i{0}; i < cur_height - reorg_height; ++i) {
+                    std::vector<CTransactionRef> txs;
+                    if (!disconnected_blocks.empty() && disconnected_blocks[i].vtx.size() > 1) {
+                        txs = std::vector<CTransactionRef>{std::make_move_iterator(disconnected_blocks[i].vtx.begin() + 1), std::make_move_iterator(disconnected_blocks[i].vtx.end())};
+                        disconnected_blocks[i] = CBlock{};
+                    }
+                    auto block{CreateValidBlock(fuzzed_data_provider, chainparams.GetConsensus(), ancestor, utxos, std::move(txs))};
+                    assert(chainman.AcceptBlock(std::make_shared<CBlock>(std::move(block)), dummy_valstate, &ancestor, true, nullptr, nullptr, true));
+                }
+                }
+
+                // Make sure the new chain gets connected (a single additional block might not suffice).
+                while (chainman.ActiveHeight() <= cur_height) {
+                    auto block{CreateValidBlock(fuzzed_data_provider, chainparams.GetConsensus(), ancestor, utxos)};
+                    auto res{WITH_LOCK(cs_main, return chainman.AcceptBlock(std::make_shared<CBlock>(std::move(block)), dummy_valstate, &ancestor, true, nullptr, nullptr, true))};
+                    assert(res);
+                    assert(chainman.ActiveChainstate().ActivateBestChain(dummy_valstate));
+                }
+            }
+        );
+    };
+
+    scheduler.stop(); // FIXME: slow.
+    GetMainSignals().UnregisterBackgroundSignalScheduler();
+
+    // FIXME: ImportBlocks is insanely slow because we've got 128MiB blk files. Can we find an alternative to be able to
+    // exercise the reindex logic?
+    // TODO: sometimes run with an assumed chainstate too. One way could be to generate a snapshot during init and
+    // sometimes ActivateSnapshot() at the beginning of the harness.
 }
