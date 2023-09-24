@@ -1,5 +1,4 @@
 #include <base58.h>
-#include <util/base58_address.h>
 #include <boost/test/unit_test.hpp>
 
 #include <string>
