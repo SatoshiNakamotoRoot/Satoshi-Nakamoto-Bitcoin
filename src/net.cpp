@@ -2181,13 +2181,12 @@ void CConnman::WakeMessageHandler()
     condMsgProc.notify_one();
 }
 
-void CConnman::QueryDNSSeeds()
+void CConnman::QueryDNSSeeds(std::chrono::time_point<NodeClock> start)
 {
     constexpr int TARGET_OUTBOUND_CONNECTIONS = 2;
     int outbound_connection_count = 0;
 
     if (gArgs.IsArgSet("-seednode")) {
-        auto start = NodeClock::now();
         constexpr std::chrono::seconds SEEDNODE_TIMEOUT = 30s;
         LogPrintf("-seednode enabled. Trying the provided seeds for %d seconds before defaulting to the dnsseeds.\n", SEEDNODE_TIMEOUT.count());
         while (!interruptNet) {
@@ -2237,7 +2236,6 @@ void CConnman::QueryDNSSeeds()
         //   that query them.
         // * If we continue having problems, eventually query all the
         //   DNS seeds, and if that fails too, also try the fixed seeds.
-        //   (done in ThreadOpenConnections)
         int found = 0;
         const std::chrono::seconds seeds_wait_time = (addrman.Size() >= DNSSEEDS_DELAY_PEER_THRESHOLD ? DNSSEEDS_DELAY_MANY_PEERS : DNSSEEDS_DELAY_FEW_PEERS);
 
@@ -2324,12 +2322,11 @@ void CConnman::QueryDNSSeeds()
 void CConnman::ProcessFixedSeeds(std::chrono::time_point<NodeClock> start)
 {
     const bool dnsseed = gArgs.GetBoolArg("-dnsseed", DEFAULT_DNSSEED);
-    bool add_fixed_seeds = gArgs.GetBoolArg("-fixedseeds", DEFAULT_FIXEDSEEDS);
     const bool use_seednodes{gArgs.IsArgSet("-seednode")};
 
     while (!interruptNet) {
         const std::unordered_set<Network> fixed_seed_networks{GetReachableEmptyNetworks()};
-        if (add_fixed_seeds && !fixed_seed_networks.empty()) {
+        if (!fixed_seed_networks.empty()) {
             // When the node starts with an empty peers.dat, there are a few other sources of peers before
             // we fallback on to fixed seeds: -dnsseed, -seednode, -addnode
             // If none of those are available, we fallback on to fixed seeds immediately, else we allow
@@ -2364,7 +2361,6 @@ void CConnman::ProcessFixedSeeds(std::chrono::time_point<NodeClock> start)
                 CNetAddr local;
                 local.SetInternal("fixedseeds");
                 addrman.Add(seed_addrs, local);
-                add_fixed_seeds = false;
                 LogPrintf("Added %d fixed seeds from reachable networks.\n", seed_addrs.size());
                 return;
             }
@@ -2382,7 +2378,7 @@ void CConnman::ThreadAddressSeed()
 {
     auto start_time{NodeClock::now()};
     if (gArgs.GetBoolArg("-dnsseed", DEFAULT_DNSSEED)) {
-        QueryDNSSeeds();
+        QueryDNSSeeds(start_time);
     } else {
         LogPrintf("DNS seeding disabled\n");
     }
