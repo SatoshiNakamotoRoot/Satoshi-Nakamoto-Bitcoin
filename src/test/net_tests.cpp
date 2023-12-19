@@ -397,6 +397,8 @@ BOOST_AUTO_TEST_CASE(cnetaddr_unserialize_v2)
     CNetAddr addr;
     DataStream s{};
     const auto ser_params{CAddress::V2_NETWORK};
+    #undef Span
+    #define Span std::span<const uint8_t>
 
     // Valid IPv4.
     s << Span{ParseHex("01"          // network type (IPv4)
@@ -597,6 +599,8 @@ BOOST_AUTO_TEST_CASE(cnetaddr_unserialize_v2)
     s >> ser_params(addr);
     BOOST_CHECK(!addr.IsValid());
     BOOST_REQUIRE(s.empty());
+    #undef Span
+    #define Span std::span
 }
 
 // prior to PR #14728, this test triggers an undefined behavior
