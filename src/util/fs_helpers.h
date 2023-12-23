@@ -45,6 +45,10 @@ enum class LockResult {
 [[nodiscard]] LockResult LockDirectory(const fs::path& directory, const fs::path& lockfile_name, bool probe_only = false);
 } // namespace util
 void UnlockDirectory(const fs::path& directory, const fs::path& lockfile_name);
+
+//! Used to replace the implementation of the CheckDiskSpace function.
+extern std::function<bool(const fs::path&, uint64_t)> g_mock_check_disk_space;
+
 bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes = 0);
 
 /** Get the size of a file by scanning it.

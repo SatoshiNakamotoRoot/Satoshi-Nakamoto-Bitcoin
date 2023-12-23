@@ -21,10 +21,23 @@
 #include <cerrno>
 #include <string>
 
+namespace fs {
+
+std::function<bool(const std::filesystem::path&)> g_mock_create_dirs{nullptr};
+
+std::function<bool(const path&)> g_mock_exists{nullptr};
+
+} // fs
+
 namespace fsbridge {
+
+std::function<FILE*(const fs::path&, const char*)> g_mock_fopen{nullptr};
 
 FILE *fopen(const fs::path& p, const char *mode)
 {
+    if (g_mock_fopen) {
+        return g_mock_fopen(p, mode);
+    }
 #ifndef WIN32
     return ::fopen(p.c_str(), mode);
 #else

@@ -84,10 +84,16 @@ static inline path absolute(const path& p)
     return std::filesystem::absolute(p);
 }
 
+//! Used to replace the implementation of the fs::exists function.
+extern std::function<bool(const path&)> g_mock_exists;
+
 // Disallow implicit std::string conversion for exists to avoid
 // locale-dependent encoding on windows.
 static inline bool exists(const path& p)
 {
+    if (g_mock_exists) {
+        return g_mock_exists(p);
+    }
     return std::filesystem::exists(p);
 }
 
@@ -180,6 +186,9 @@ static inline path PathFromString(const std::string& string)
 #endif
 }
 
+//! Used to replace the implementation of the fs::create_directories function.
+extern std::function<bool(const std::filesystem::path&)> g_mock_create_dirs;
+
 /**
  * Create directory (and if necessary its parents), unless the leaf directory
  * already exists or is a symlink to an existing directory.
@@ -189,6 +198,9 @@ static inline path PathFromString(const std::string& string)
  */
 static inline bool create_directories(const std::filesystem::path& p)
 {
+    if (g_mock_create_dirs) {
+        return g_mock_create_dirs(p);
+    }
     if (std::filesystem::is_symlink(p) && std::filesystem::is_directory(p)) {
         return false;
     }
@@ -207,6 +219,10 @@ bool create_directories(const std::filesystem::path& p, std::error_code& ec) = d
 /** Bridge operations to C stdio */
 namespace fsbridge {
     using FopenFn = std::function<FILE*(const fs::path&, const char*)>;
+
+    //! Used to replace the implementation of the fsbridge::fopen function.
+    extern std::function<FILE*(const fs::path&, const char*)> g_mock_fopen;
+
     FILE *fopen(const fs::path& p, const char *mode);
 
     /**
