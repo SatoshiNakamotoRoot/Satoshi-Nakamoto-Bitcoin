@@ -46,7 +46,7 @@ FUZZ_TARGET(wallet_bdb_parser, .init = initialize_wallet_bdb_parser)
 
     fs::path bdb_ro_dumpfile{g_setup->m_args.GetDataDirNet() / "fuzzed_dumpfile_bdb_ro.dump"};
     if (fs::exists(bdb_ro_dumpfile)) { // Writing into an existing dump file will throw an exception
-        remove(bdb_ro_dumpfile);
+        fs::remove(bdb_ro_dumpfile);
     }
     g_setup->m_args.ForceSetArg("-dumpfile", fs::PathToString(bdb_ro_dumpfile));
 
@@ -102,7 +102,7 @@ FUZZ_TARGET(wallet_bdb_parser, .init = initialize_wallet_bdb_parser)
     // Try opening with BDB
     fs::path bdb_dumpfile{g_setup->m_args.GetDataDirNet() / "fuzzed_dumpfile_bdb.dump"};
     if (fs::exists(bdb_dumpfile)) { // Writing into an existing dump file will throw an exception
-        remove(bdb_dumpfile);
+        fs::remove(bdb_dumpfile);
     }
     g_setup->m_args.ForceSetArg("-dumpfile", fs::PathToString(bdb_dumpfile));
 

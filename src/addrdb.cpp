@@ -62,7 +62,7 @@ bool SerializeFileDB(const std::string& prefix, const fs::path& path, const Data
     AutoFile fileout{file};
     if (fileout.IsNull()) {
         fileout.fclose();
-        remove(pathTmp);
+        fs::remove(pathTmp);
         LogError("%s: Failed to open file %s\n", __func__, fs::PathToString(pathTmp));
         return false;
     }
@@ -70,12 +70,12 @@ bool SerializeFileDB(const std::string& prefix, const fs::path& path, const Data
     // Serialize
     if (!SerializeDB(fileout, data)) {
         fileout.fclose();
-        remove(pathTmp);
+        fs::remove(pathTmp);
         return false;
     }
     if (!FileCommit(fileout.Get())) {
         fileout.fclose();
-        remove(pathTmp);
+        fs::remove(pathTmp);
         LogError("%s: Failed to flush file %s\n", __func__, fs::PathToString(pathTmp));
         return false;
     }
@@ -83,7 +83,7 @@ bool SerializeFileDB(const std::string& prefix, const fs::path& path, const Data
 
     // replace existing file, if any, with new file
     if (!RenameOver(pathTmp, path)) {
-        remove(pathTmp);
+        fs::remove(pathTmp);
         LogError("%s: Rename-into-place failed\n", __func__);
         return false;
     }
