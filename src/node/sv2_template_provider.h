@@ -44,6 +44,12 @@ private:
 
     std::unique_ptr<Sv2Connman> m_connman;
 
+    /** Get name of file to store static key */
+    fs::path GetStaticKeyFile();
+
+    /** Get name of file to store authority key */
+    fs::path GetAuthorityKeyFile();
+
     /**
     * Minimum fee delta required before submitting an updated template.
     * This may be negative.
