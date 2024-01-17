@@ -53,6 +53,9 @@ BOOST_AUTO_TEST_CASE(ForgetPeerTest)
     TxReconciliationTracker tracker(TXRECONCILIATION_VERSION, hasher);
     NodeId peer_id0 = 0;
 
+    // Removing peer which is not there works.
+    tracker.ForgetPeer(peer_id0);
+
     // Removing peer after pre-registring works and does not let to register the peer.
     tracker.PreRegisterPeer(peer_id0);
     tracker.ForgetPeer(peer_id0);
