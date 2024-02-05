@@ -160,6 +160,7 @@ FUZZ_TARGET(connman, .init = initialize_connman)
     (void)connman.GetTotalBytesSent();
     (void)connman.GetTryNewOutboundPeer();
     (void)connman.GetUseAddrmanOutgoing();
+    (void)connman.ASMapHealthCheck();
 
     connman.ClearTestNodes();
 }
