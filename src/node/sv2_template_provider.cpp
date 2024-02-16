@@ -53,11 +53,14 @@ bool Sv2TemplateProvider::Start(const Sv2TemplateProviderOptions& options)
         }
     }
 
+    m_minimum_fee_delta = gArgs.GetIntArg("-sv2feedelta", DEFAULT_SV2_FEE_DELTA);
+
     if (!m_connman->Start(this, host, port)) {
         return false;
     }
 
     m_thread_sv2_handler = std::thread(&util::TraceThread, "sv2", [this] { ThreadSv2Handler(); });
+    m_thread_sv2_mempool_handler = std::thread(&util::TraceThread, "sv2mempool", [this] { ThreadSv2MempoolHandler(); });
     return true;
 }
 
@@ -82,6 +85,9 @@ void Sv2TemplateProvider::StopThreads()
     if (m_thread_sv2_handler.joinable()) {
         m_thread_sv2_handler.join();
     }
+    if (m_thread_sv2_mempool_handler.joinable()) {
+        m_thread_sv2_mempool_handler.join();
+    }
 }
 
 void Sv2TemplateProvider::ThreadSv2Handler()
@@ -98,15 +104,16 @@ void Sv2TemplateProvider::ThreadSv2Handler()
         }
 
         if (best_block_changed) {
-            LOCK(m_tp_mutex);
-            m_best_prev_hash = tip.first;
-            m_last_block_time = GetTime<std::chrono::seconds>();
-        }
+            {
+                LOCK(m_tp_mutex);
+                m_best_prev_hash = tip.first;
+                m_last_block_time = GetTime<std::chrono::seconds>();
+                m_template_last_update = GetTime<std::chrono::seconds>();
+            }
 
-        // In a later commit we'll also push new templates based on changes to
-        // the mempool, so this if condition will no longer match the one above.
-        if (best_block_changed) {
             m_connman->ForEachClient([this, best_block_changed](Sv2Client& client) {
+                client.m_latest_submitted_template_fees = 0;
+
                 // For newly connected clients, we call SendWork after receiving
                 // CoinbaseOutputDataSize.
                 if (client.m_coinbase_tx_outputs_size == 0) return;
@@ -124,6 +131,70 @@ void Sv2TemplateProvider::ThreadSv2Handler()
         PruneBlockTemplateCache();
     }
 }
+
+class Timer {
+private:
+    std::chrono::seconds m_interval;
+    std::chrono::seconds m_last_triggered;
+
+public:
+    Timer(std::chrono::seconds interval) : m_interval(interval) {
+        reset();
+    }
+
+    bool trigger() {
+        auto now{GetTime<std::chrono::seconds>()};
+        if (now - m_last_triggered >= m_interval) {
+            m_last_triggered = now;
+            return true;
+        }
+        return false;
+    }
+
+    void reset() {
+        auto now{GetTime<std::chrono::seconds>()};
+        m_last_triggered = now;
+    }
+};
+
+void Sv2TemplateProvider::ThreadSv2MempoolHandler()
+{
+    auto interval{std::chrono::seconds(gArgs.GetIntArg("-sv2interval", DEFAULT_SV2_INTERVAL))};
+    Timer timer(interval);
+
+    while (!m_flag_interrupt_sv2) {
+        auto timeout{std::min(std::chrono::milliseconds(100), std::chrono::milliseconds(interval))};
+        // TODO: after cluster mempool pass in:
+        //       - m_minimum_fee_delta
+        //       - block template fees at the time of the last template update
+        if (!m_mining.waitFeesChanged(timeout, WITH_LOCK(m_tp_mutex, return m_best_prev_hash;))) {
+            timer.reset();
+            continue;
+        }
+
+        // TODO ensure all connected clients have had work queued up for the latest prevhash.
+
+        // Do not send new templates more frequently than -sv2interval
+        if (!timer.trigger()) continue;
+
+        // If we never created a template, continue
+        if (m_template_last_update == std::chrono::milliseconds(0)) continue;
+
+        m_connman->ForEachClient([this](Sv2Client& client) {
+            // For newly connected clients, we call SendWork after receiving
+            // CoinbaseOutputDataSize.
+            if (client.m_coinbase_tx_outputs_size == 0) return;
+
+            LOCK(this->m_tp_mutex);
+            if (!SendWork(client, /*send_new_prevhash=*/false)) {
+                LogPrintLevel(BCLog::SV2, BCLog::Level::Trace, "Disconnecting client id=%zu\n",
+                                client.m_id);
+                client.m_disconnect_flag = true;
+            }
+        });
+    }
+}
+
 
 void Sv2TemplateProvider::ReceivedMessage(Sv2Client& client, node::Sv2MsgType msg_type) {
     switch (msg_type)
@@ -268,6 +339,16 @@ bool Sv2TemplateProvider::SendWork(Sv2Client& client, bool send_new_prevhash)
         m_best_prev_hash = new_work_set.block_template->getBlockHeader().hashPrevBlock;
     }
 
+    // Do not submit new template if the fee increase is insufficient.
+    // TODO: drop this when waitFeesChanged actually checks fee_delta.
+    CAmount fees = 0;
+    for (CAmount fee : new_work_set.block_template->getTxFees()) {
+        // Skip coinbase
+        if (fee < 0) continue;
+        fees += fee;
+    }
+    if (!send_new_prevhash && client.m_latest_submitted_template_fees + m_minimum_fee_delta > fees) return true;
+
     LogPrintLevel(BCLog::SV2, BCLog::Level::Debug, "Send 0x71 NewTemplate id=%lu to client id=%zu\n", m_template_id, client.m_id);
     client.m_send_messages.emplace_back(new_work_set.new_template);
 
@@ -277,6 +358,7 @@ bool Sv2TemplateProvider::SendWork(Sv2Client& client, bool send_new_prevhash)
     }
 
     m_block_template_cache.insert({m_template_id, std::move(new_work_set.block_template)});
+    client.m_latest_submitted_template_fees = fees;
 
     return true;
 }

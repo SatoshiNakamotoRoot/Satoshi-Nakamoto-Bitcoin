@@ -45,9 +45,20 @@ private:
     std::unique_ptr<Sv2Connman> m_connman;
 
     /**
+    * Minimum fee delta required before submitting an updated template.
+    * This may be negative.
+    */
+    int m_minimum_fee_delta;
+
+    /**
      * The main thread for the template provider.
      */
     std::thread m_thread_sv2_handler;
+
+    /**
+     * The secondary thread for the template provider.
+     */
+    std::thread m_thread_sv2_mempool_handler;
 
     /**
      * Signal for handling interrupts and stopping the template provider event loop.
@@ -60,6 +71,12 @@ private:
      * which happens for each connected client.
      */
     uint64_t m_template_id GUARDED_BY(m_tp_mutex){0};
+
+    /**
+     * Last time we created a new template
+     */
+    std::chrono::milliseconds m_template_last_update{0};
+
 
     /**
      * The current best known block hash in the network.
@@ -95,6 +112,13 @@ public:
      * all tasks for the template provider.
      */
     void ThreadSv2Handler() EXCLUSIVE_LOCKS_REQUIRED(!m_tp_mutex);
+
+    /**
+     * Secondary thread for the template provider, contains an event loop handling
+     * mempool updates.
+     */
+    void ThreadSv2MempoolHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_tp_mutex);
+
 
     /**
      * Triggered on interrupt signals to stop the main event loop in ThreadSv2Handler().

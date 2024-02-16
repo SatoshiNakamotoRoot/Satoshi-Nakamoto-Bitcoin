@@ -58,6 +58,11 @@ struct Sv2Client
      */
     unsigned int m_coinbase_tx_outputs_size;
 
+    /**
+     * Fees in sat paid by the last submitted template
+     */
+    CAmount m_latest_submitted_template_fees = 0;
+
     explicit Sv2Client(size_t id, std::shared_ptr<Sock> sock, std::unique_ptr<Sv2Transport> transport) :
                        m_id{id}, m_sock{std::move(sock)}, m_transport{std::move(transport)} {};
 
