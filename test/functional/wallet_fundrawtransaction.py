@@ -1322,7 +1322,7 @@ class RawTransactionsTest(BitcoinTestFramework):
         outputs = []
         for _ in range(1472):
             outputs.append({wallet.getnewaddress(address_type="legacy"): 0.1})
-        txid = self.nodes[0].send(outputs=outputs)["txid"]
+        txid = self.nodes[0].send(outputs=outputs, change_address=wallet.getnewaddress(address_type="legacy"))["txid"]
         self.generate(self.nodes[0], 1)
 
         # 272 WU per input (273 when high-s); picking 1471 inputs will exceed the max standard tx weight.
