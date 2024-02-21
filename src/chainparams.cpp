@@ -70,6 +70,14 @@ void ParseSignetParams(const std::vector<uint8_t>& params, CChainParams::SigNetO
         return;
     }
 
+    // The format of params is extendable in case more fields are added in the future.
+    // It is encoded as a concatenation of (field_id, value) tuples, protobuf style.
+    // Currently there is only one field defined: pow_target_spacing, whose field_id
+    // is 0x01 and the lendth of encoding is 8 (int64_t). So valid values of params are:
+    //  - empty string (checked in if block above),
+    //  - 0x01 followed by 8 bytes of pow_target_spacing (9 bytes in total).
+    // If length is not 0 and not 9, the value can not be parsed.
+
     if (params.size() != 1 + 8) {
         throw std::runtime_error(strprintf("signet params must have length %d, got %d.", 1+8, params.size()));
     }
