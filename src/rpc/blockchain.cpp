@@ -2645,6 +2645,25 @@ static RPCHelpMan getblockfilter()
 }
 
 /**
+ * RAII class that disables the network in its constructor and enables it in its
+ * destructor.
+ */
+class NetworkDisable
+{
+    CConnman& m_connman;
+public:
+    NetworkDisable(CConnman& connman) : m_connman(connman) {
+        m_connman.SetNetworkActive(false);
+        if (m_connman.GetNetworkActive()) {
+            throw JSONRPCError(RPC_MISC_ERROR, "Network activity could not be suspended.");
+        }
+    };
+    ~NetworkDisable() {
+        m_connman.SetNetworkActive(true);
+    };
+};
+
+/**
  * Serialize the UTXO set to a file for loading elsewhere.
  *
  * @see SnapshotMetadata
@@ -2656,6 +2675,9 @@ static RPCHelpMan dumptxoutset()
         "Write the serialized UTXO set to a file.",
         {
             {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "Path to the output file. If relative, will be prefixed by datadir."},
+            {"height", RPCArg::Type::NUM, RPCArg::DefaultHint{"the latest valid snapshot height"},
+                "Height of the UTXO set file. Note: The further this number is from the tip, the longer this process will take. Consider setting a higher -rpcclienttimeout value in this case."
+            },
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -2695,9 +2717,65 @@ static RPCHelpMan dumptxoutset()
     }
 
     NodeContext& node = EnsureAnyNodeContext(request.context);
+    CConnman& connman = EnsureConnman(node);
+
+    const CBlockIndex* target_index{};
+    if (request.params[1].isNull()) {
+        auto snapshot_heights = node.chainman->GetParams().GetAvailableSnapshotHeights();
+        auto max_height = std::max_element(snapshot_heights.begin(), snapshot_heights.end());
+        target_index = ParseHashOrHeight(*max_height, *node.chainman);
+    } else {
+        target_index = ParseHashOrHeight(request.params[1], *node.chainman);
+    }
+
+    const auto tip{WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Tip())};
+    const CBlockIndex* invalidate_index{nullptr};
+    std::unique_ptr<NetworkDisable> disable_network;
+
+    // If the user wants to dump the txoutset of the current tip, we don't have
+    // to roll back at all
+    if (target_index != tip) {
+        // If the node is running in pruned mode we ensure all necessary block
+        // data is available before starting to roll back.
+        if (node.chainman->m_blockman.IsPruneMode()) {
+            LOCK(node.chainman->GetMutex());
+            const CBlockIndex* current_tip{node.chainman->ActiveChain().Tip()};
+            const CBlockIndex* first_block{node.chainman->m_blockman.GetFirstBlock(*current_tip, /*status_mask=*/BLOCK_HAVE_MASK)};
+            if (first_block->nHeight > target_index->nHeight) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Could not roll back to requested height since necessary block data is already pruned.");
+            }
+        }
+
+        // Suspend network activity for the duration of the process when we are
+        // rolling back the chain to get a utxo set from a past height. We do
+        // this so we don't punish peers that send us that send us data that
+        // seems wrong in this temporary state. For example a normal new block
+        // would be classified as a block connecting an invalid block.
+        disable_network = std::make_unique<NetworkDisable>(connman);
+
+        invalidate_index = WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Next(target_index));
+        InvalidateBlock(*node.chainman, invalidate_index->GetBlockHash());
+        const CBlockIndex* new_tip_index{WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Tip())};
+
+        // In case there is any issue with a block being read from disk we need
+        // to stop here, otherwise the dump could still be created for the wrong
+        // height.
+        // The new tip could also not be the target block if we have a stale
+        // sister block of invalidate_index. This block (or a descendant) would
+        // be activated as the new tip and we would not get to new_tip_index.
+        if (new_tip_index != target_index) {
+            ReconsiderBlock(*node.chainman, invalidate_index->GetBlockHash());
+            throw JSONRPCError(RPC_MISC_ERROR, "Could not roll back to requested height, reverting to tip.");
+        }
+    }
+
     UniValue result = CreateUTXOSnapshot(
         node, node.chainman->ActiveChainstate(), afile, path, temppath);
     fs::rename(temppath, path);
+
+    if (invalidate_index) {
+        ReconsiderBlock(*node.chainman, invalidate_index->GetBlockHash());
+    }
 
     result.pushKV("path", path.utf8string());
     return result;
