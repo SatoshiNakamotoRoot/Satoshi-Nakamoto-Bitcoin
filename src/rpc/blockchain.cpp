@@ -2672,7 +2672,9 @@ static RPCHelpMan dumptxoutset()
 {
     return RPCHelpMan{
         "dumptxoutset",
-        "Write the serialized UTXO set to a file.",
+        "Write the serialized UTXO set to a file. This can be used in loadtxoutset afterwards if this snapshot height is supported in the chainparams as well.\n\n"
+        "Unless the requested height is the current tip, the node will roll back to the requested height and network activity will be suspended during this process."
+        "Because of this it is discouraged to interact with the node in any other way during the execution of this call to avoid inconsistent results and race conditions, particularly RPCs that interact with blockstorage.",
         {
             {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "Path to the output file. If relative, will be prefixed by datadir."},
             {"height", RPCArg::Type::NUM, RPCArg::DefaultHint{"the latest valid snapshot height"},
@@ -2753,6 +2755,8 @@ static RPCHelpMan dumptxoutset()
         // would be classified as a block connecting an invalid block.
         disable_network = std::make_unique<NetworkDisable>(connman);
 
+        // Note: Unlocking cs_main before CreateUTXOSnapshot might be racy
+        // if the user interacts with any other *block RPCs.
         invalidate_index = WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Next(target_index));
         InvalidateBlock(*node.chainman, invalidate_index->GetBlockHash());
         const CBlockIndex* new_tip_index{WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Tip())};
