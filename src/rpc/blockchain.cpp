@@ -1723,13 +1723,13 @@ static RPCHelpMan getchaintxstats()
     const CBlockIndex& past_block{*CHECK_NONFATAL(pindex->GetAncestor(pindex->nHeight - blockcount))};
     const int64_t nTimeDiff{pindex->GetMedianTimePast() - past_block.GetMedianTimePast()};
     const auto window_tx_count{
-        (pindex->nChainTx != 0 && past_block.nChainTx != 0) ? std::optional{pindex->nChainTx - past_block.nChainTx} : std::nullopt,
+        (pindex->m_chain_tx_count != 0 && past_block.m_chain_tx_count != 0) ? std::optional{pindex->m_chain_tx_count - past_block.m_chain_tx_count} : std::nullopt,
     };
 
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("time", (int64_t)pindex->nTime);
-    if (pindex->nChainTx) {
-        ret.pushKV("txcount", pindex->nChainTx);
+    if (pindex->m_chain_tx_count) {
+        ret.pushKV("txcount", pindex->m_chain_tx_count);
     }
     ret.pushKV("window_final_block_hash", pindex->GetBlockHash().GetHex());
     ret.pushKV("window_final_block_height", pindex->nHeight);
@@ -2796,7 +2796,7 @@ UniValue CreateUTXOSnapshot(
     result.pushKV("base_height", tip->nHeight);
     result.pushKV("path", path.utf8string());
     result.pushKV("txoutset_hash", maybe_stats->hashSerialized.ToString());
-    result.pushKV("nchaintx", tip->nChainTx);
+    result.pushKV("nchaintx", tip->m_chain_tx_count);
     return result;
 }
 
