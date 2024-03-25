@@ -11,8 +11,10 @@
 #include <primitives/transaction.h>
 #include <script/keyorigin.h>
 #include <script/signingprovider.h>
+#include <wallet/coinselection.h>
 
 #include <algorithm>
+#include <bitset>
 #include <map>
 #include <optional>
 #include <set>
@@ -117,6 +119,8 @@ public:
     std::optional<uint32_t> m_version;
     //! Use this change target instead of default behavior if set
     std::optional<CAmount> m_change_target;
+    //! Enable corresponding coin selection algorithms
+    std::bitset<size_t(SelectionAlgorithm::NUM_ELEMENTS)> m_enable_algos{std::numeric_limits<size_t>::max()};
 
     CCoinControl();
 

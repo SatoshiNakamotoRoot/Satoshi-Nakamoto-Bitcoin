@@ -536,6 +536,7 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
                 {"maxconf", UniValueType(UniValue::VNUM)},
                 {"input_weights", UniValueType(UniValue::VARR)},
                 {"change_target", UniValueType()}, // will be checked by AmountFromValue() below
+                {"enable_algos", UniValueType(UniValue::VARR)},
             },
             true, true);
 
@@ -618,6 +619,18 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
             }
         }
         SetFeeEstimateMode(wallet, coinControl, options["conf_target"], options["estimate_mode"], options["fee_rate"], override_min_fee);
+
+        if (options.exists("enable_algos")) {
+            coinControl.m_enable_algos.reset();
+            for (const UniValue& algo_name : options["enable_algos"].get_array().getValues()) {
+                auto algo_index = GetAlgorithmIndex(algo_name.get_str());
+                if (algo_index) {
+                    coinControl.m_enable_algos.set(algo_index.value());
+                } else {
+                    throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("'%s' is not a valid coin selection algorithm name.", algo_name.get_str()));
+                }
+            }
+        }
       }
     } else {
         // if options is null and not a bool
@@ -792,6 +805,11 @@ RPCHelpMan fundrawtransaction()
                                 },
                              },
                              {"change_target", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to default wallet behavior"}, "Specify a target change amount in " + CURRENCY_UNIT + "."},
+                             {"enable_algos", RPCArg::Type::ARR, RPCArg::Default{UniValue::VARR}, "The coin selection algorithms to enable.",
+                                {
+                                    {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "One of: \"bnb\", \"cg\", \"knapsack\" or \"srd\"."},
+                                }
+                             },
                         },
                         FundTxDoc()),
                         RPCArgOptions{
@@ -1247,6 +1265,11 @@ RPCHelpMan send()
                         },
                     },
                     {"change_target", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to default wallet behavior"}, "Specify a target change amount in " + CURRENCY_UNIT + "."},
+                    {"enable_algos", RPCArg::Type::ARR, RPCArg::Default{UniValue::VARR}, "The coin selection algorithms to enable.",
+                        {
+                            {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "One of: \"bnb\", \"cg\", \"knapsack\" or \"srd\"."},
+                        }
+                    },
                 },
                 FundTxDoc()),
                 RPCArgOptions{.oneline_description="options"}},
@@ -1697,6 +1720,11 @@ RPCHelpMan walletcreatefundedpsbt()
                                 },
                             },
                             {"change_target", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to default wallet behavior"}, "Specify a target change amount in " + CURRENCY_UNIT + "."},
+                            {"enable_algos", RPCArg::Type::ARR, RPCArg::Default{UniValue::VARR}, "The coin selection algorithms to enable.",
+                                {
+                                    {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "One of: \"bnb\", \"cg\", \"knapsack\" or \"srd\"."},
+                                }
+                            },
                         },
                         FundTxDoc()),
                         RPCArgOptions{.oneline_description="options"}},
