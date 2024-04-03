@@ -72,6 +72,11 @@ static std::optional<std::pair<WalletDescriptor, FlatSigningProvider>> CreateWal
     std::unique_ptr<Descriptor> parsed_desc{Parse(desc_str.value(), keys, error, false)};
     if (!parsed_desc) return std::nullopt;
 
+    FlatSigningProvider out_keys;
+    std::vector<CScript> scripts_temp;
+    DescriptorCache temp_cache;
+    if (!parsed_desc->Expand(0, keys, scripts_temp, out_keys, &temp_cache)) return std::nullopt;
+
     WalletDescriptor w_desc{std::move(parsed_desc), /*creation_time=*/0, /*range_start=*/0, /*range_end=*/1, /*next_index=*/1};
     return std::make_pair(w_desc, keys);
 }
