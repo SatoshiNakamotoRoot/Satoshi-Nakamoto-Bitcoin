@@ -142,8 +142,6 @@ bool BCLog::Logger::DefaultShrinkDebugFile() const
 }
 
 static const std::map<std::string, BCLog::LogFlags> LOG_CATEGORIES_BY_STR{
-    {"0", BCLog::NONE},
-    {"", BCLog::NONE},
     {"net", BCLog::NET},
     {"tor", BCLog::TOR},
     {"mempool", BCLog::MEMPOOL},
@@ -175,8 +173,6 @@ static const std::map<std::string, BCLog::LogFlags> LOG_CATEGORIES_BY_STR{
     {"txreconciliation", BCLog::TXRECONCILIATION},
     {"scan", BCLog::SCAN},
     {"txpackages", BCLog::TXPACKAGES},
-    {"1", BCLog::ALL},
-    {"all", BCLog::ALL},
 };
 
 static const std::unordered_map<BCLog::LogFlags, std::string> LOG_CATEGORIES_BY_FLAG{
@@ -184,11 +180,8 @@ static const std::unordered_map<BCLog::LogFlags, std::string> LOG_CATEGORIES_BY_
     [](const std::map<std::string, BCLog::LogFlags>& in) {
         std::unordered_map<BCLog::LogFlags, std::string> out;
         for (const auto& [k, v] : in) {
-            switch (v) {
-            case BCLog::NONE: out.emplace(BCLog::NONE, ""); break;
-            case BCLog::ALL: out.emplace(BCLog::ALL, "all"); break;
-            default: out.emplace(v, k);
-            }
+            const bool inserted{out.emplace(v, k).second};
+            assert(inserted);
         }
         return out;
     }(LOG_CATEGORIES_BY_STR)
@@ -196,8 +189,12 @@ static const std::unordered_map<BCLog::LogFlags, std::string> LOG_CATEGORIES_BY_
 
 bool GetLogCategory(BCLog::LogFlags& flag, const std::string& str)
 {
-    if (str.empty()) {
+    if (str.empty() || str == "1" || str == "all") {
         flag = BCLog::ALL;
+        return true;
+    }
+    if (str == "0") {
+        flag = BCLog::NONE;
         return true;
     }
     auto it = LOG_CATEGORIES_BY_STR.find(str);
@@ -227,6 +224,12 @@ std::string BCLog::Logger::LogLevelToStr(BCLog::Level level)
 
 std::string LogCategoryToStr(BCLog::LogFlags category)
 {
+    if (category == BCLog::NONE) {
+        return "";
+    }
+    if (category == BCLog::ALL) {
+        return "all";
+    }
     auto it = LOG_CATEGORIES_BY_FLAG.find(category);
     assert(it != LOG_CATEGORIES_BY_FLAG.end());
     return it->second;
@@ -252,10 +255,9 @@ static std::optional<BCLog::Level> GetLogLevel(const std::string& level_str)
 std::vector<LogCategory> BCLog::Logger::LogCategoriesList() const
 {
     std::vector<LogCategory> ret;
+    ret.reserve(LOG_CATEGORIES_BY_STR.size());
     for (const auto& [category, flag] : LOG_CATEGORIES_BY_STR) {
-        if (flag != BCLog::NONE && flag != BCLog::ALL) {
-            ret.push_back(LogCategory{.category = category, .active = WillLogCategory(flag)});
-        }
+        ret.push_back(LogCategory{.category = category, .active = WillLogCategory(flag)});
     }
     return ret;
 }
