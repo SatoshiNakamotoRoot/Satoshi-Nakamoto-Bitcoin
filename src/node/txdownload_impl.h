@@ -7,6 +7,7 @@
 #include <node/txdownloadman.h>
 
 #include <common/bloom.h>
+#include <kernel/chain.h>
 #include <net.h>
 #include <txorphanage.h>
 #include <txrequest.h>
@@ -95,6 +96,10 @@ public:
     CRollingBloomFilter m_recent_confirmed_transactions{48'000, 0.000'001};
 
     TxDownloadImpl() = default;
+
+    void ActiveTipChange();
+    void BlockConnected(const std::shared_ptr<const CBlock>& pblock);
+    void BlockDisconnected();
 };
 } // namespace node
 #endif // BITCOIN_NODE_TXDOWNLOAD_IMPL_H
