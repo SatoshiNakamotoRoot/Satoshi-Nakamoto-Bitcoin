@@ -43,6 +43,8 @@ struct TxDownloadOptions {
     const CTxMemPool& m_mempool;
     /** RNG provided by caller. */
     FastRandomContext& m_rng;
+    /** Maximum number of transactions allowed in orphanage. */
+    const uint32_t m_max_orphan_txs;
 };
 struct TxDownloadConnectionInfo {
     /** Whether this peer is preferred for transaction download. */
@@ -66,6 +68,8 @@ struct PackageToValidate {
 
     // Move ctor
     PackageToValidate(PackageToValidate&& other) : m_txns{std::move(other.m_txns)}, m_senders{std::move(other.m_senders)} {}
+    // Copy ctor
+    PackageToValidate(const PackageToValidate& other) : m_txns{other.m_txns}, m_senders{other.m_senders} {}
 
     // Move assignment
     PackageToValidate& operator=(PackageToValidate&& other) {
@@ -85,6 +89,13 @@ struct PackageToValidate {
                          m_senders.back());
     }
 };
+struct RejectedTxTodo
+{
+    bool m_should_add_extra_compact_tx;
+    std::vector<uint256> m_unique_parents;
+    std::optional<PackageToValidate> m_package_to_validate;
+};
+
 
 class TxDownloadManager {
     const std::unique_ptr<TxDownloadImpl> m_impl;
@@ -137,6 +148,9 @@ public:
 
     /** Respond to successful transaction submission to mempool */
     void MempoolAcceptedTx(const CTransactionRef& tx);
+
+    /** Respond to transaction rejected from mempool */
+    RejectedTxTodo MempoolRejectedTx(const CTransactionRef& ptx, const TxValidationState& state, NodeId nodeid, bool maybe_add_new_orphan);
 };
 } // namespace node
 #endif // BITCOIN_NODE_TXDOWNLOADMAN_H
