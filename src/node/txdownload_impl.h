@@ -136,6 +136,8 @@ public:
     void ReceivedNotFound(NodeId nodeid, const std::vector<uint256>& txhashes);
 
     std::optional<PackageToValidate> Find1P1CPackage(const CTransactionRef& ptx, NodeId nodeid);
+
+    void MempoolAcceptedTx(const CTransactionRef& tx);
 };
 } // namespace node
 #endif // BITCOIN_NODE_TXDOWNLOAD_IMPL_H

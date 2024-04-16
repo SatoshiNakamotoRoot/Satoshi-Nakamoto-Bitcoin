@@ -212,4 +212,16 @@ std::optional<PackageToValidate> TxDownloadImpl::Find1P1CPackage(const CTransact
     }
     return std::nullopt;
 }
+
+void TxDownloadImpl::MempoolAcceptedTx(const CTransactionRef& tx)
+{
+    // As this version of the transaction was acceptable, we can forget about any requests for it.
+    // No-op if the tx is not in txrequest.
+    m_txrequest.ForgetTxHash(tx->GetHash());
+    m_txrequest.ForgetTxHash(tx->GetWitnessHash());
+
+    m_orphanage.AddChildrenToWorkSet(*tx);
+    // If it came from the orphanage, remove it. No-op if the tx is not in txorphanage.
+    m_orphanage.EraseTx(tx->GetWitnessHash());
+}
 } // namespace node

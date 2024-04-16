@@ -75,4 +75,8 @@ std::optional<PackageToValidate> TxDownloadManager::Find1P1CPackage(const CTrans
 {
     return m_impl->Find1P1CPackage(ptx, nodeid);
 }
+void TxDownloadManager::MempoolAcceptedTx(const CTransactionRef& tx)
+{
+    m_impl->MempoolAcceptedTx(tx);
+}
 } // namespace node
