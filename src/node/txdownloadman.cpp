@@ -49,4 +49,13 @@ bool TxDownloadManager::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsi
 {
     return m_impl->AlreadyHaveTx(gtxid, include_reconsiderable);
 }
+
+void TxDownloadManager::ConnectedPeer(NodeId nodeid, const TxDownloadConnectionInfo& info)
+{
+    m_impl->ConnectedPeer(nodeid, info);
+}
+void TxDownloadManager::DisconnectedPeer(NodeId nodeid)
+{
+    m_impl->DisconnectedPeer(nodeid);
+}
 } // namespace node
