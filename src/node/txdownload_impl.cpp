@@ -49,4 +49,32 @@ void TxDownloadImpl::BlockDisconnected()
     // should be just after a new block containing it is found.
     m_recent_confirmed_transactions.reset();
 }
+bool TxDownloadImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable)
+{
+    const uint256& hash = gtxid.GetHash();
+
+    if (gtxid.IsWtxid()) {
+        // Normal query by wtxid.
+        if (m_orphanage.HaveTx(Wtxid::FromUint256(hash))) return true;
+    } else {
+        // Never query by txid: it is possible that the transaction in the orphanage has the same
+        // txid but a different witness, which would give us a false positive result. If we decided
+        // not to request the transaction based on this result, an attacker could prevent us from
+        // downloading a transaction by intentionally creating a malleated version of it.  While
+        // only one (or none!) of these transactions can ultimately be confirmed, we have no way of
+        // discerning which one that is, so the orphanage can store multiple transactions with the
+        // same txid.
+        //
+        // While we won't query by txid, we can try to "guess" what the wtxid is based on the txid.
+        // A non-segwit transaction's txid == wtxid. Query this txid "casted" to a wtxid. This will
+        // help us find non-segwit transactions, saving bandwidth, and should have no false positives.
+        if (m_orphanage.HaveTx(Wtxid::FromUint256(hash))) return true;
+    }
+
+    if (include_reconsiderable && m_recent_rejects_reconsiderable.contains(hash)) return true;
+
+    if (m_recent_confirmed_transactions.contains(hash)) return true;
+
+    return m_recent_rejects.contains(hash) || m_opts.m_mempool.exists(gtxid);
+}
 } // namespace node

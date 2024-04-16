@@ -44,4 +44,9 @@ void TxDownloadManager::BlockDisconnected()
 {
     m_impl->BlockDisconnected();
 }
+
+bool TxDownloadManager::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconsiderable)
+{
+    return m_impl->AlreadyHaveTx(gtxid, include_reconsiderable);
+}
 } // namespace node
