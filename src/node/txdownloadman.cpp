@@ -7,8 +7,8 @@
 
 namespace node {
 
-TxDownloadManager::TxDownloadManager() :
-    m_impl{std::make_unique<TxDownloadImpl>()}
+TxDownloadManager::TxDownloadManager(const TxDownloadOptions& options) :
+    m_impl{std::make_unique<TxDownloadImpl>(options)}
 {}
 TxDownloadManager::~TxDownloadManager() = default;
 

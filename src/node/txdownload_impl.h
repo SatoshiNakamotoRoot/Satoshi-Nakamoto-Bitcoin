@@ -12,9 +12,13 @@
 #include <txorphanage.h>
 #include <txrequest.h>
 
+class CTxMemPool;
 namespace node {
+
 class TxDownloadImpl {
 public:
+    TxDownloadOptions m_opts;
+
     /** Manages unvalidated tx data (orphan transactions for which we are downloading ancestors). */
     TxOrphanage m_orphanage;
     /** Tracks candidates for requesting and downloading transaction data. */
@@ -95,7 +99,7 @@ public:
      */
     CRollingBloomFilter m_recent_confirmed_transactions{48'000, 0.000'001};
 
-    TxDownloadImpl() = default;
+    TxDownloadImpl(const TxDownloadOptions& options) : m_opts{options} {}
 
     void ActiveTipChange();
     void BlockConnected(const std::shared_ptr<const CBlock>& pblock);

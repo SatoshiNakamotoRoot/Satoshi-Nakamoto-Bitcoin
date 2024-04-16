@@ -7,6 +7,7 @@
 
 #include <chain.h>
 #include <consensus/validation.h>
+#include <txmempool.h>
 #include <validation.h>
 #include <validationinterface.h>
 
