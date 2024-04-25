@@ -58,4 +58,12 @@ void TxDownloadManager::DisconnectedPeer(NodeId nodeid)
 {
     m_impl->DisconnectedPeer(nodeid);
 }
+bool TxDownloadManager::AddTxAnnouncement(NodeId peer, const GenTxid& gtxid, std::chrono::microseconds now, bool p2p_inv)
+{
+    return m_impl->AddTxAnnouncement(peer, gtxid, now, p2p_inv);
+}
+std::vector<GenTxid> TxDownloadManager::GetRequestsToSend(NodeId nodeid, std::chrono::microseconds current_time)
+{
+    return m_impl->GetRequestsToSend(nodeid, current_time);
+}
 } // namespace node
