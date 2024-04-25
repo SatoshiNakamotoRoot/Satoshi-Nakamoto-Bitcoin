@@ -66,4 +66,9 @@ std::vector<GenTxid> TxDownloadManager::GetRequestsToSend(NodeId nodeid, std::ch
 {
     return m_impl->GetRequestsToSend(nodeid, current_time);
 }
+
+void TxDownloadManager::ReceivedNotFound(NodeId nodeid, const std::vector<uint256>& txhashes)
+{
+    m_impl->ReceivedNotFound(nodeid, txhashes);
+}
 } // namespace node
