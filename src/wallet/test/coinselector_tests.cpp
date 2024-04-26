@@ -100,7 +100,7 @@ std::optional<SelectionResult> KnapsackSolver(std::vector<OutputGroup>& groups, 
 
 std::optional<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& cost_of_change)
 {
-    auto res{SelectCoinsBnB(utxo_pool, selection_target, cost_of_change, MAX_STANDARD_TX_WEIGHT)};
+    auto res{SelectCoinsBnB(utxo_pool, selection_target, cost_of_change, MAX_STANDARD_TX_WEIGHT, /*add_excess_to_target=*/false)};
     return res ? std::optional<SelectionResult>(*res) : std::nullopt;
 }
 
@@ -439,7 +439,7 @@ BOOST_AUTO_TEST_CASE(bnb_search_test)
 
         CAmount selection_target = 16 * CENT;
         const auto& no_res = SelectCoinsBnB(GroupCoins(available_coins.All(), /*subtract_fee_outputs*/true),
-                                            selection_target, /*cost_of_change=*/0, MAX_STANDARD_TX_WEIGHT);
+                                            selection_target, /*cost_of_change=*/0, MAX_STANDARD_TX_WEIGHT, /*add_excess_to_target=*/false);
         BOOST_REQUIRE(!no_res);
         BOOST_CHECK(util::ErrorString(no_res).original.find("The inputs size exceeds the maximum weight") != std::string::npos);
 

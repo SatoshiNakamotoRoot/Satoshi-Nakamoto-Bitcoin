@@ -537,6 +537,7 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
                 {"input_weights", UniValueType(UniValue::VARR)},
                 {"change_target", UniValueType()}, // will be checked by AmountFromValue() below
                 {"enable_algos", UniValueType(UniValue::VARR)},
+                {"add_excess_to_recipient_position", UniValue::VNUM},
             },
             true, true);
 
@@ -631,6 +632,14 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
                 }
             }
         }
+
+        if (options.exists("add_excess_to_recipient_position")) {
+            coinControl.m_add_excess_to_recipient_position = options["add_excess_to_recipient_position"].getInt<uint32_t>();
+            if (coinControl.m_add_excess_to_recipient_position.value() >= recipients.size()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Cannot add excess to the recipient output at index %d; the output does not exist.", coinControl.m_add_excess_to_recipient_position.value()));
+            }
+        }
+
       }
     } else {
         // if options is null and not a bool
@@ -810,6 +819,7 @@ RPCHelpMan fundrawtransaction()
                                     {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "One of: \"bnb\", \"cg\", \"knapsack\" or \"srd\"."},
                                 }
                              },
+                             {"add_excess_to_recipient_position", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The zero-based output index where excess fees are added. If not set, excess value from changeless transactions is added to fees"},
                         },
                         FundTxDoc()),
                         RPCArgOptions{
@@ -1270,6 +1280,7 @@ RPCHelpMan send()
                             {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "One of: \"bnb\", \"cg\", \"knapsack\" or \"srd\"."},
                         }
                     },
+                    {"add_excess_to_recipient_position", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The zero-based output index where excess fees are added. If not set, excess value from changeless transactions is added to fees."},
                 },
                 FundTxDoc()),
                 RPCArgOptions{.oneline_description="options"}},
@@ -1725,6 +1736,7 @@ RPCHelpMan walletcreatefundedpsbt()
                                     {"algo", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "One of: \"bnb\", \"cg\", \"knapsack\" or \"srd\"."},
                                 }
                             },
+                            {"add_excess_to_recipient_position", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The zero-based output index where excess fees are added. If not set, excess value from changeless transactions is added to fees."},
                         },
                         FundTxDoc()),
                         RPCArgOptions{.oneline_description="options"}},

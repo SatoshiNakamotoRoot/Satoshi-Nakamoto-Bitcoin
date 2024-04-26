@@ -697,7 +697,7 @@ util::Result<SelectionResult> ChooseSelectionResult(interfaces::Chain& chain, co
     if (coin_selection_params.m_enable_algos.test(size_t(SelectionAlgorithm::BNB))) {
         // SFFO frequently causes issues in the context of changeless input sets: skip BnB when SFFO is active
         if (!coin_selection_params.m_subtract_fee_outputs) {
-            if (auto bnb_result{SelectCoinsBnB(groups.positive_group, nTargetValue, coin_selection_params.m_cost_of_change, max_inputs_weight)}) {
+            if (auto bnb_result{SelectCoinsBnB(groups.positive_group, nTargetValue, coin_selection_params.m_cost_of_change, max_inputs_weight, coin_selection_params.m_add_excess_to_recipient_position.has_value())}) {
                 results.push_back(*bnb_result);
             } else append_error(std::move(bnb_result));
         }
@@ -1102,6 +1102,9 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     // All algorithms, or a subset of algorithms enabled by the user
     coin_selection_params.m_enable_algos = coin_control.m_enable_algos;
 
+    // If set, do not add any excess from a changeless transaction to fees
+    coin_selection_params.m_add_excess_to_recipient_position = coin_control.m_add_excess_to_recipient_position;
+
     // vouts to the payees
     for (const auto& recipient : vecSend)
     {
@@ -1156,7 +1159,13 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
            result.GetWaste(),
            result.GetSelectedValue());
 
-    const CAmount change_amount = result.GetChange(coin_selection_params.min_viable_change, coin_selection_params.m_change_fee);
+    if (result.GetTarget() != selection_target && coin_selection_params.m_add_excess_to_recipient_position) {
+        auto excess = result.GetTarget() - selection_target;
+        txNew.vout[coin_selection_params.m_add_excess_to_recipient_position.value()].nValue += excess;
+        recipients_sum += excess;
+    }
+
+    CAmount change_amount = result.GetChange(coin_selection_params.min_viable_change, coin_selection_params.m_change_fee);
     if (change_amount > 0) {
         CTxOut newTxOut(change_amount, scriptChange);
         if (!change_pos) {

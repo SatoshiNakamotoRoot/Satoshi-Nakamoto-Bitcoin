@@ -85,13 +85,14 @@ struct {
  * @param const CAmount& cost_of_change This is the cost of creating and spending a change output.
  *        This plus selection_target is the upper bound of the range.
  * @param int max_weight The maximum weight available for the input set.
+ * @param bool add_excess_to_target When true do not count excess as waste and add to the result target
  * @returns The result of this coin selection algorithm, or std::nullopt
  */
 
 static const size_t TOTAL_TRIES = 100000;
 
 util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& cost_of_change,
-                                             int max_weight)
+                                             int max_weight, const bool add_excess_to_target)
 {
     SelectionResult result(selection_target, SelectionAlgorithm::BNB);
     CAmount curr_value = 0;
@@ -193,6 +194,11 @@ util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool
     // Set output set
     for (const size_t& i : best_selection) {
         result.AddInput(utxo_pool.at(i));
+    }
+
+    if (add_excess_to_target) {
+        auto excess = result.ResetTargetToSelectedValue();
+        best_waste -= excess;
     }
     result.ComputeAndSetWaste(cost_of_change, cost_of_change, CAmount{0});
     assert(best_waste == result.GetWaste());
@@ -849,6 +855,13 @@ void SelectionResult::ComputeAndSetWaste(const CAmount min_viable_change, const 
     } else {
         m_waste = GetSelectionWaste(0, m_target, m_use_effective);
     }
+}
+
+CAmount SelectionResult::ResetTargetToSelectedValue()
+{
+    CAmount excess = (m_use_effective ? GetSelectedEffectiveValue(): GetSelectedValue()) - m_target;
+    m_target += excess;
+    return excess;
 }
 
 void SelectionResult::SetAlgoCompleted(bool algo_completed)

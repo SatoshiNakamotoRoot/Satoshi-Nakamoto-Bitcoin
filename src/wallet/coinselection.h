@@ -190,6 +190,11 @@ struct CoinSelectionParams {
      * to its SelectionAlgorithm enum value set to true. By default all algorithms are enabled.
     */
     std::bitset<size_t(SelectionAlgorithm::NUM_ELEMENTS)> m_enable_algos{std::numeric_limits<size_t>::max()};
+    /***
+     * When set, excess value for changeless results will be added to the target amount at the given position
+     * and not counted as waste. Otherwise excess value will be be applied to fees and counted as waste.
+    */
+    std::optional<uint32_t> m_add_excess_to_recipient_position;
 
     CoinSelectionParams(FastRandomContext& rng_fast, size_t change_output_size, size_t change_spend_size,
                         CAmount min_change_target, CFeeRate effective_feerate,
@@ -396,6 +401,9 @@ public:
     /** How much individual inputs overestimated the bump fees for shared ancestries */
     void SetBumpFeeDiscount(const CAmount discount);
 
+    /** Reset target to the current selected amount */
+    CAmount ResetTargetToSelectedValue();
+
     /** Calculates and stores the waste for this selection via GetSelectionWaste */
     void ComputeAndSetWaste(const CAmount min_viable_change, const CAmount change_cost, const CAmount change_fee);
     [[nodiscard]] CAmount GetWaste() const;
@@ -454,7 +462,7 @@ public:
 };
 
 util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& cost_of_change,
-                                             int max_weight);
+                                             int max_weight, const bool add_excess_to_target);
 
 util::Result<SelectionResult> CoinGrinder(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, CAmount change_target, int max_weight);
 
