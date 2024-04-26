@@ -104,13 +104,8 @@ public:
     explicit TxDownloadManager(const TxDownloadOptions& options);
     ~TxDownloadManager();
 
-    // Get references to internal data structures. Outside access to these data structures should be
-    // temporary and removed later once logic has been moved internally.
-    TxOrphanage& GetOrphanageRef();
-    TxRequestTracker& GetTxRequestRef();
-    CRollingBloomFilter& GetRecentRejectsRef();
-    CRollingBloomFilter& GetRecentRejectsReconsiderableRef();
-    CRollingBloomFilter& GetRecentConfirmedRef();
+    void CheckIsEmpty() const;
+    void CheckIsEmpty(NodeId nodeid) const;
 
     // Responses to chain events. TxDownloadManager is not an actual client of ValidationInterface, these are called through PeerManager.
     void ActiveTipChange();
