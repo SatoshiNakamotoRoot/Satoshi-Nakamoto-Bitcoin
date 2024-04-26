@@ -433,4 +433,15 @@ std::pair<bool, std::optional<PackageToValidate>> TxDownloadImpl::ReceivedTx(Nod
 
     return std::make_pair(true, std::nullopt);
 }
+
+bool TxDownloadImpl::HaveMoreWork(NodeId nodeid)
+{
+    return m_orphanage.HaveTxToReconsider(nodeid);
+}
+
+CTransactionRef TxDownloadImpl::GetTxToReconsider(NodeId nodeid)
+{
+    return m_orphanage.GetTxToReconsider(nodeid);
+}
+
 } // namespace node
