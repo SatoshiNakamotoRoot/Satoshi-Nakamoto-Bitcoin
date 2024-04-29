@@ -366,9 +366,9 @@ public:
         if (mi == m_wallet->mapWallet.end()) {
             return false;
         }
-        num_blocks = m_wallet->GetLastBlockHeight();
+        num_blocks = m_wallet->GetBestBlockHeight();
         block_time = -1;
-        CHECK_NONFATAL(m_wallet->chain().findBlock(m_wallet->GetLastBlockHash(), FoundBlock().time(block_time)));
+        CHECK_NONFATAL(m_wallet->chain().findBlock(m_wallet->GetBestBlockHash(), FoundBlock().time(block_time)));
         tx_status = MakeWalletTxStatus(*m_wallet, mi->second);
         return true;
     }
@@ -381,7 +381,7 @@ public:
         LOCK(m_wallet->cs_wallet);
         auto mi = m_wallet->mapWallet.find(txid);
         if (mi != m_wallet->mapWallet.end()) {
-            num_blocks = m_wallet->GetLastBlockHeight();
+            num_blocks = m_wallet->GetBestBlockHeight();
             in_mempool = mi->second.InMempool();
             order_form = mi->second.vOrderForm;
             tx_status = MakeWalletTxStatus(*m_wallet, mi->second);
@@ -419,7 +419,7 @@ public:
         if (!locked_wallet) {
             return false;
         }
-        block_hash = m_wallet->GetLastBlockHash();
+        block_hash = m_wallet->GetBestBlockHash();
         balances = getBalances();
         return true;
     }
