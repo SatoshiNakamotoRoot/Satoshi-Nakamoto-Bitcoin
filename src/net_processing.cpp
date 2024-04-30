@@ -2983,10 +2983,13 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
     AssertLockHeld(g_msgproc_mutex);
     AssertLockHeld(m_tx_download_mutex);
 
+    PeerRef peer{GetPeerRef(nodeid)};
+
     auto& m_orphanage = m_txdownloadman.GetOrphanageRef();
     auto& m_txrequest = m_txdownloadman.GetTxRequestRef();
     auto& m_recent_rejects = m_txdownloadman.GetRecentRejectsRef();
     auto& m_recent_rejects_reconsiderable = m_txdownloadman.GetRecentRejectsReconsiderableRef();
+    const CTransaction& tx{*ptx};
 
     LogDebug(BCLog::MEMPOOLREJ, "%s (wtxid=%s) from peer=%d was not accepted: %s\n",
         ptx->GetHash().ToString(),
@@ -2994,7 +2997,83 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
         nodeid,
         state.ToString());
 
-    if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
+    // Only process a new orphan if maybe_add_extra_compact_tx, as otherwise it must be either
+    // already in orphanage or from 1p1c processing.
+    if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS && maybe_add_extra_compact_tx) {
+        bool fRejectedParents = false; // It may be the case that the orphans parents have all been rejected
+
+        // Deduplicate parent txids, so that we don't have to loop over
+        // the same parent txid more than once down below.
+        std::vector<uint256> unique_parents;
+        unique_parents.reserve(tx.vin.size());
+        for (const CTxIn& txin : tx.vin) {
+            // We start with all parents, and then remove duplicates below.
+            unique_parents.push_back(txin.prevout.hash);
+        }
+        std::sort(unique_parents.begin(), unique_parents.end());
+        unique_parents.erase(std::unique(unique_parents.begin(), unique_parents.end()), unique_parents.end());
+
+        // Distinguish between parents in m_recent_rejects and m_recent_rejects_reconsiderable.
+        // We can tolerate having up to 1 parent in m_recent_rejects_reconsiderable since we
+        // submit 1p1c packages. However, fail immediately if any are in m_recent_rejects.
+        std::optional<uint256> rejected_parent_reconsiderable;
+        for (const uint256& parent_txid : unique_parents) {
+            if (m_recent_rejects.contains(parent_txid)) {
+                fRejectedParents = true;
+                break;
+            } else if (m_recent_rejects_reconsiderable.contains(parent_txid) && !m_mempool.exists(GenTxid::Txid(parent_txid))) {
+                // More than 1 parent in m_recent_rejects_reconsiderable: 1p1c will not be
+                // sufficient to accept this package, so just give up here.
+                if (rejected_parent_reconsiderable.has_value()) {
+                    fRejectedParents = true;
+                    break;
+                }
+                rejected_parent_reconsiderable = parent_txid;
+            }
+        }
+        if (!fRejectedParents) {
+            const auto current_time{GetTime<std::chrono::microseconds>()};
+
+            for (const uint256& parent_txid : unique_parents) {
+                // Here, we only have the txid (and not wtxid) of the
+                // inputs, so we only request in txid mode, even for
+                // wtxidrelay peers.
+                // Eventually we should replace this with an improved
+                // protocol for getting all unconfirmed parents.
+                const auto gtxid{GenTxid::Txid(parent_txid)};
+                if (peer) AddKnownTx(*peer, parent_txid);
+                // Exclude m_recent_rejects_reconsiderable: the missing parent may have been
+                // previously rejected for being too low feerate. This orphan might CPFP it.
+                if (!m_txdownloadman.AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false)) {
+                    m_txdownloadman.AddTxAnnouncement(nodeid, gtxid, current_time, /*p2p_inv=*/false);
+                }
+            }
+
+            if (m_orphanage.AddTx(ptx, nodeid)) {
+                AddToCompactExtraTransactions(ptx);
+            }
+
+            // Once added to the orphan pool, a tx is considered AlreadyHave, and we shouldn't request it anymore.
+            m_txrequest.ForgetTxHash(tx.GetHash());
+            m_txrequest.ForgetTxHash(tx.GetWitnessHash());
+
+            // DoS prevention: do not allow m_orphanage to grow unbounded (see CVE-2012-3789)
+            m_orphanage.LimitOrphans(m_opts.max_orphan_txs, m_rng);
+        } else {
+            LogPrint(BCLog::MEMPOOL, "not keeping orphan with rejected parents %s (wtxid=%s)\n",
+                     tx.GetHash().ToString(),
+                     tx.GetWitnessHash().ToString());
+            // We will continue to reject this tx since it has rejected
+            // parents so avoid re-requesting it from other peers.
+            // Here we add both the txid and the wtxid, as we know that
+            // regardless of what witness is provided, we will not accept
+            // this, so we don't need to allow for redownload of this txid
+            // from any of our non-wtxidrelay peers.
+            m_recent_rejects.insert(tx.GetHash().ToUint256());
+            m_recent_rejects.insert(tx.GetWitnessHash().ToUint256());
+            m_txrequest.ForgetTxHash(tx.GetHash());
+            m_txrequest.ForgetTxHash(tx.GetWitnessHash());
+        }
         return;
     } else if (state.GetResult() != TxValidationResult::TX_WITNESS_STRIPPED) {
         // We can add the wtxid of this transaction to our reject filter.
@@ -4354,8 +4433,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         LOCK2(cs_main, m_tx_download_mutex);
 
         auto& m_txrequest = m_txdownloadman.GetTxRequestRef();
-        auto& m_orphanage = m_txdownloadman.GetOrphanageRef();
-        auto& m_recent_rejects = m_txdownloadman.GetRecentRejectsRef();
         auto& m_recent_rejects_reconsiderable = m_txdownloadman.GetRecentRejectsReconsiderableRef();
 
         m_txrequest.ReceivedResponse(pfrom.GetId(), txid);
@@ -4425,83 +4502,6 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (result.m_result_type == MempoolAcceptResult::ResultType::VALID) {
             ProcessValidTx(pfrom.GetId(), ptx, result.m_replaced_transactions);
             pfrom.m_last_tx_time = GetTime<std::chrono::seconds>();
-        }
-        else if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS)
-        {
-            bool fRejectedParents = false; // It may be the case that the orphans parents have all been rejected
-
-            // Deduplicate parent txids, so that we don't have to loop over
-            // the same parent txid more than once down below.
-            std::vector<uint256> unique_parents;
-            unique_parents.reserve(tx.vin.size());
-            for (const CTxIn& txin : tx.vin) {
-                // We start with all parents, and then remove duplicates below.
-                unique_parents.push_back(txin.prevout.hash);
-            }
-            std::sort(unique_parents.begin(), unique_parents.end());
-            unique_parents.erase(std::unique(unique_parents.begin(), unique_parents.end()), unique_parents.end());
-
-            // Distinguish between parents in m_recent_rejects and m_recent_rejects_reconsiderable.
-            // We can tolerate having up to 1 parent in m_recent_rejects_reconsiderable since we
-            // submit 1p1c packages. However, fail immediately if any are in m_recent_rejects.
-            std::optional<uint256> rejected_parent_reconsiderable;
-            for (const uint256& parent_txid : unique_parents) {
-                if (m_recent_rejects.contains(parent_txid)) {
-                    fRejectedParents = true;
-                    break;
-                } else if (m_recent_rejects_reconsiderable.contains(parent_txid) && !m_mempool.exists(GenTxid::Txid(parent_txid))) {
-                    // More than 1 parent in m_recent_rejects_reconsiderable: 1p1c will not be
-                    // sufficient to accept this package, so just give up here.
-                    if (rejected_parent_reconsiderable.has_value()) {
-                        fRejectedParents = true;
-                        break;
-                    }
-                    rejected_parent_reconsiderable = parent_txid;
-                }
-            }
-            if (!fRejectedParents) {
-                const auto current_time{GetTime<std::chrono::microseconds>()};
-
-                for (const uint256& parent_txid : unique_parents) {
-                    // Here, we only have the txid (and not wtxid) of the
-                    // inputs, so we only request in txid mode, even for
-                    // wtxidrelay peers.
-                    // Eventually we should replace this with an improved
-                    // protocol for getting all unconfirmed parents.
-                    const auto gtxid{GenTxid::Txid(parent_txid)};
-                    AddKnownTx(*peer, parent_txid);
-                    // Exclude m_recent_rejects_reconsiderable: the missing parent may have been
-                    // previously rejected for being too low feerate. This orphan might CPFP it.
-                    if (!m_txdownloadman.AlreadyHaveTx(gtxid, /*include_reconsiderable=*/false)) {
-                        m_txdownloadman.AddTxAnnouncement(pfrom.GetId(), gtxid, current_time, /*p2p_inv=*/false);
-                    }
-                }
-
-                if (m_orphanage.AddTx(ptx, pfrom.GetId())) {
-                    AddToCompactExtraTransactions(ptx);
-                }
-
-                // Once added to the orphan pool, a tx is considered AlreadyHave, and we shouldn't request it anymore.
-                m_txrequest.ForgetTxHash(tx.GetHash());
-                m_txrequest.ForgetTxHash(tx.GetWitnessHash());
-
-                // DoS prevention: do not allow m_orphanage to grow unbounded (see CVE-2012-3789)
-                m_orphanage.LimitOrphans(m_opts.max_orphan_txs, m_rng);
-            } else {
-                LogPrint(BCLog::MEMPOOL, "not keeping orphan with rejected parents %s (wtxid=%s)\n",
-                         tx.GetHash().ToString(),
-                         tx.GetWitnessHash().ToString());
-                // We will continue to reject this tx since it has rejected
-                // parents so avoid re-requesting it from other peers.
-                // Here we add both the txid and the wtxid, as we know that
-                // regardless of what witness is provided, we will not accept
-                // this, so we don't need to allow for redownload of this txid
-                // from any of our non-wtxidrelay peers.
-                m_recent_rejects.insert(tx.GetHash().ToUint256());
-                m_recent_rejects.insert(tx.GetWitnessHash().ToUint256());
-                m_txrequest.ForgetTxHash(tx.GetHash());
-                m_txrequest.ForgetTxHash(tx.GetWitnessHash());
-            }
         }
         if (state.IsInvalid()) {
             ProcessInvalidTx(pfrom.GetId(), ptx, state, /*maybe_add_extra_compact_tx=*/true);
