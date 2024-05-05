@@ -703,8 +703,8 @@ case $host in
          case $host in
            *aarch64*)
              dnl The preferred Homebrew prefix for Apple Silicon is /opt/homebrew.
-             dnl Therefore, as we do not use pkg-config to detect miniupnpc and libnatpmp
-             dnl packages, we should set the CPPFLAGS and LDFLAGS variables for them
+             dnl Therefore, as we do not use pkg-config to detect the miniupnpc
+             dnl package, we should set the CPPFLAGS and LDFLAGS variables for them
              dnl explicitly.
              if test "$use_upnp" != "no" && $BREW list --versions miniupnpc >/dev/null; then
                miniupnpc_prefix=$($BREW --prefix miniupnpc 2>/dev/null)
@@ -1117,7 +1117,6 @@ if test "$enable_fuzz" = "yes"; then
   use_tests=no
   use_external_signer=no
   use_upnp=no
-  use_natpmp=no
   use_zmq=no
   enable_fuzz_binary=yes
 
@@ -1209,7 +1208,6 @@ AM_CONDITIONAL([ENABLE_USDT_TRACEPOINTS], [test "$use_usdt" = "yes"])
 
 if test "$build_bitcoind$bitcoin_enable_qt$use_bench$use_tests" = "nononono"; then
   use_upnp=no
-  use_natpmp=no
   use_zmq=no
 fi
 
@@ -1714,7 +1712,6 @@ fi
 echo "  with fuzz binary = $enable_fuzz_binary"
 echo "  with bench      = $use_bench"
 echo "  with upnp       = $use_upnp"
-echo "  with natpmp     = $use_natpmp"
 echo "  USDT tracing    = $use_usdt"
 echo "  sanitizers      = $use_sanitizers"
 echo "  debug enabled   = $enable_debug"
