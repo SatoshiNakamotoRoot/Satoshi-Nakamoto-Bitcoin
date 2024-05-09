@@ -639,7 +639,7 @@ FUZZ_TARGET(clusterlin_linearization_chunking)
         }
         todo -= done;
         chunking.MarkDone(done);
-        subset = SetInfo(depgraph, subset.transactions - done);
+        subset = subset.Remove(depgraph, done);
     }
 
     assert(chunking.ChunksLeft() == 0);
