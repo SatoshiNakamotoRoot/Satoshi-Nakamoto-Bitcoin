@@ -488,9 +488,11 @@ FUZZ_TARGET(clusterlin_search_finder)
             assert(found.transactions.IsSupersetOf(depgraph.Ancestors(i) & todo));
         }
 
-        // At most 2^N-1 iterations can be required: the number of non-empty subsets a graph with N
-        // transactions has.
-        assert(iterations_done <= ((uint64_t{1} << todo.Count()) - 1));
+        // At most 2^(N-1) iterations can be required: the maximum number of topological subsets a
+        // (connected) cluster with N transactions can have. Even when the cluster is no longer
+        // connected after removing certain transactions, this holds, because the connected
+        // components are searched separately.
+        assert(iterations_done <= (uint64_t{1} << (todo.Count() - 1)));
 
         // Perform quality checks only if SearchCandidateFinder claims an optimal result.
         if (iterations_done < max_iterations) {
@@ -678,10 +680,10 @@ FUZZ_TARGET(clusterlin_linearize)
     }
 
     // If the iteration count is sufficiently high, an optimal linearization must be found.
-    // Each linearization step can use up to 2^k iterations, with steps k=1..n. That sum is
-    // 2 * (2^n - 1)
+    // Each linearization step can use up to 2^(k-1) iterations, with steps k=1..n. That sum is
+    // 2^n - 1.
     const uint64_t n = depgraph.TxCount();
-    if (n <= 18 && iter_count > 2U * ((uint64_t{1} << n) - 1U)) {
+    if (n <= 19 && iter_count > (uint64_t{1} << n)) {
         assert(optimal);
     }
 
