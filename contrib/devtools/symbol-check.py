@@ -60,7 +60,7 @@ ELF_INTERPRETER_NAMES: dict[lief.ELF.ARCH, dict[lief.ENDIANNESS, str]] = {
         lief.ENDIANNESS.LITTLE: "/lib/ld-linux-armhf.so.3",
     },
     lief.ELF.ARCH.AARCH64: {
-        lief.ENDIANNESS.LITTLE: "/lib/ld-linux-aarch64.so.1",
+        lief.ENDIANNESS.LITTLE: "",
     },
     lief.ELF.ARCH.PPC64:   {
         lief.ENDIANNESS.BIG: "/lib64/ld64.so.1",
@@ -221,6 +221,9 @@ def check_ELF_libraries(binary) -> bool:
     ok: bool = True
 
     if binary.header.machine_type == lief.ELF.ARCH.x86_64:
+        return len(binary.libraries) == 0
+
+    if binary.header.machine_type == lief.ELF.ARCH.AARCH64:
         return len(binary.libraries) == 0
 
     for library in binary.libraries:
