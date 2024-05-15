@@ -566,8 +566,8 @@ private:
     bool MaybeDiscourageAndDisconnect(CNode& pnode, Peer& peer);
 
     struct PackageToValidate {
-        const Package m_txns;
-        const std::vector<NodeId> m_senders;
+        Package m_txns;
+        std::vector<NodeId> m_senders;
         /** Construct a 1-parent-1-child package. */
         explicit PackageToValidate(const CTransactionRef& parent,
                                    const CTransactionRef& child,
@@ -576,6 +576,16 @@ private:
             m_txns{parent, child},
             m_senders {parent_sender, child_sender}
         {}
+
+        // Move ctor
+        PackageToValidate(PackageToValidate&& other) : m_txns{std::move(other.m_txns)}, m_senders{std::move(other.m_senders)} {}
+
+        // Move assignment
+        PackageToValidate& operator=(PackageToValidate&& other) {
+            this->m_txns = std::move(other.m_txns);
+            this->m_senders = std::move(other.m_senders);
+            return *this;
+        }
 
         std::string ToString() const {
             Assume(m_txns.size() == 2);
@@ -594,7 +604,7 @@ private:
      *                                            Set to false if the tx has already been rejected before,
      *                                            e.g. is an orphan, to avoid adding duplicate entries.
      * Updates m_txrequest, m_recent_rejects, m_recent_rejects_reconsiderable, m_orphanage, and vExtraTxnForCompact. */
-    void ProcessInvalidTx(NodeId nodeid, const CTransactionRef& tx, const TxValidationState& result,
+    std::optional<PackageToValidate> ProcessInvalidTx(NodeId nodeid, const CTransactionRef& tx, const TxValidationState& result,
                           bool maybe_add_extra_compact_tx)
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex, m_tx_download_mutex);
 
@@ -2976,7 +2986,7 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
     return;
 }
 
-void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx, const TxValidationState& state,
+std::optional<PeerManagerImpl::PackageToValidate> PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx, const TxValidationState& state,
                                        bool maybe_add_extra_compact_tx)
 {
     AssertLockNotHeld(m_peer_mutex);
@@ -2996,6 +3006,9 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
         ptx->GetWitnessHash().ToString(),
         nodeid,
         state.ToString());
+
+    // Populated if failure is reconsiderable and eligible package is found.
+    std::optional<PackageToValidate> package_to_validate;
 
     // Only process a new orphan if maybe_add_extra_compact_tx, as otherwise it must be either
     // already in orphanage or from 1p1c processing.
@@ -3074,7 +3087,7 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
             m_txrequest.ForgetTxHash(tx.GetHash());
             m_txrequest.ForgetTxHash(tx.GetWitnessHash());
         }
-        return;
+        return std::nullopt;
     } else if (state.GetResult() != TxValidationResult::TX_WITNESS_STRIPPED) {
         // We can add the wtxid of this transaction to our reject filter.
         // Do not add txids of witness transactions or witness-stripped
@@ -3094,6 +3107,14 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
             // because we should not download or submit this transaction by itself again, but may
             // submit it as part of a package later.
             m_recent_rejects_reconsiderable.insert(ptx->GetWitnessHash().ToUint256());
+
+            if (maybe_add_extra_compact_tx) {
+                // When a transaction fails for TX_RECONSIDERABLE, look for a matching child in the
+                // orphanage, as it is possible that they succeed as a package.
+                LogPrint(BCLog::TXPACKAGES, "tx %s (wtxid=%s) failed but reconsiderable, looking for child in orphanage\n",
+                         ptx->GetHash().ToString(), ptx->GetWitnessHash().ToString());
+                package_to_validate = Find1P1CPackage(ptx, nodeid);
+            }
         } else {
             m_recent_rejects.insert(ptx->GetWitnessHash().ToUint256());
         }
@@ -3124,6 +3145,8 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
     if (Assume(state.GetResult() != TxValidationResult::TX_MISSING_INPUTS) && m_orphanage.EraseTx(ptx->GetWitnessHash()) > 0) {
         LogDebug(BCLog::TXPACKAGES, "   removed orphan tx %s (wtxid=%s)\n", ptx->GetHash().ToString(), ptx->GetWitnessHash().ToString());
     }
+
+    return package_to_validate;
 }
 
 void PeerManagerImpl::ProcessValidTx(NodeId nodeid, const CTransactionRef& tx, const std::list<CTransactionRef>& replaced_transactions)
@@ -4504,14 +4527,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             pfrom.m_last_tx_time = GetTime<std::chrono::seconds>();
         }
         if (state.IsInvalid()) {
-            ProcessInvalidTx(pfrom.GetId(), ptx, state, /*maybe_add_extra_compact_tx=*/true);
-        }
-        // When a transaction fails for TX_RECONSIDERABLE, look for a matching child in the
-        // orphanage, as it is possible that they succeed as a package.
-        if (state.GetResult() == TxValidationResult::TX_RECONSIDERABLE) {
-            LogPrint(BCLog::TXPACKAGES, "tx %s (wtxid=%s) failed but reconsiderable, looking for child in orphanage\n",
-                     txid.ToString(), wtxid.ToString());
-            if (auto package_to_validate{Find1P1CPackage(ptx, pfrom.GetId())}) {
+            if (auto package_to_validate{ProcessInvalidTx(pfrom.GetId(), ptx, state, /*maybe_add_extra_compact_tx=*/true)}) {
                 const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_to_validate->m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
                 LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate->ToString(),
                          package_result.m_state.IsValid() ? "package accepted" : "package rejected");
