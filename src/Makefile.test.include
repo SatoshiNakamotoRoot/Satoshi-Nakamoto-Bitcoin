@@ -393,6 +393,7 @@ test_fuzz_fuzz_SOURCES = \
  test/fuzz/torcontrol.cpp \
  test/fuzz/transaction.cpp \
  test/fuzz/txdownloadman.cpp \
+ test/fuzz/tx_download.cpp \
  test/fuzz/tx_in.cpp \
  test/fuzz/tx_out.cpp \
  test/fuzz/tx_pool.cpp \
