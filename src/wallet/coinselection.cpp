@@ -91,7 +91,7 @@ struct {
 
 static const size_t TOTAL_TRIES = 100000;
 
-util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& cost_of_change,
+util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& max_excess,
                                              int max_weight, const bool add_excess_to_target)
 {
     SelectionResult result(selection_target, SelectionAlgorithm::BNB);
@@ -126,7 +126,7 @@ util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool
         // Conditions for starting a backtrack
         bool backtrack = false;
         if (curr_value + curr_available_value < selection_target || // Cannot possibly reach target with the amount remaining in the curr_available_value.
-            curr_value > selection_target + cost_of_change || // Selected value is out of range, go back and try other branch
+            curr_value > selection_target + max_excess || // Selected value is out of range, go back and try other branch
             (curr_waste > best_waste && is_feerate_high)) { // Don't select things which we know will be more wasteful if the waste is increasing
             backtrack = true;
         } else if (curr_selection_weight > max_weight) { // Exceeding weight for standard tx, cannot find more solutions by adding more inputs
@@ -200,7 +200,7 @@ util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool
         auto excess = result.ResetTargetToSelectedValue();
         best_waste -= excess;
     }
-    result.ComputeAndSetWaste(cost_of_change, cost_of_change, CAmount{0});
+    result.ComputeAndSetWaste(max_excess, max_excess, CAmount{0});
     assert(best_waste == result.GetWaste());
 
     return result;

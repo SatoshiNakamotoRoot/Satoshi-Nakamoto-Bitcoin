@@ -538,6 +538,7 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
                 {"change_target", UniValueType()}, // will be checked by AmountFromValue() below
                 {"enable_algos", UniValueType(UniValue::VARR)},
                 {"add_excess_to_recipient_position", UniValue::VNUM},
+                {"max_excess", UniValueType()}, // will be checked by AmountFromValue() below
             },
             true, true);
 
@@ -621,6 +622,10 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
         }
         SetFeeEstimateMode(wallet, coinControl, options["conf_target"], options["estimate_mode"], options["fee_rate"], override_min_fee);
 
+        if (options.exists("change_target")) {
+            coinControl.m_change_target = CAmount(AmountFromValue(options["change_target"]));
+        }
+
         if (options.exists("enable_algos")) {
             coinControl.m_enable_algos.reset();
             for (const UniValue& algo_name : options["enable_algos"].get_array().getValues()) {
@@ -638,6 +643,10 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
             if (coinControl.m_add_excess_to_recipient_position.value() >= recipients.size()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Cannot add excess to the recipient output at index %d; the output does not exist.", coinControl.m_add_excess_to_recipient_position.value()));
             }
+        }
+
+        if (options.exists("max_excess")) {
+            coinControl.m_max_excess = CAmount(AmountFromValue(options["max_excess"]));
         }
 
       }
@@ -723,9 +732,6 @@ CreatedTransactionResult FundTransaction(CWallet& wallet, const CMutableTransact
 
             coinControl.SetInputWeight(COutPoint(txid, vout), weight);
         }
-    }
-    if (options.exists("change_target")) {
-        coinControl.m_change_target = CAmount(AmountFromValue(options["change_target"]));
     }
 
     if (recipients.empty())
@@ -820,6 +826,7 @@ RPCHelpMan fundrawtransaction()
                                 }
                              },
                              {"add_excess_to_recipient_position", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The zero-based output index where excess fees are added. If not set, excess value from changeless transactions is added to fees"},
+                             {"max_excess", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to default wallet behavior"}, "Specify the maximum excess amount for changeless transactions in " + CURRENCY_UNIT + "."},
                         },
                         FundTxDoc()),
                         RPCArgOptions{
@@ -1281,6 +1288,7 @@ RPCHelpMan send()
                         }
                     },
                     {"add_excess_to_recipient_position", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The zero-based output index where excess fees are added. If not set, excess value from changeless transactions is added to fees."},
+                    {"max_excess", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to default wallet behavior"}, "Specify the maximum excess amount for changeless transactions in " + CURRENCY_UNIT + "."},
                 },
                 FundTxDoc()),
                 RPCArgOptions{.oneline_description="options"}},
@@ -1737,6 +1745,7 @@ RPCHelpMan walletcreatefundedpsbt()
                                 }
                             },
                             {"add_excess_to_recipient_position", RPCArg::Type::NUM, RPCArg::Optional::OMITTED, "The zero-based output index where excess fees are added. If not set, excess value from changeless transactions is added to fees."},
+                            {"max_excess", RPCArg::Type::AMOUNT, RPCArg::DefaultHint{"not set, fall back to default wallet behavior"}, "Specify the maximum excess amount for changeless transactions in " + CURRENCY_UNIT + "."},
                         },
                         FundTxDoc()),
                         RPCArgOptions{.oneline_description="options"}},

@@ -123,6 +123,8 @@ public:
     std::bitset<size_t(SelectionAlgorithm::NUM_ELEMENTS)> m_enable_algos{std::numeric_limits<size_t>::max()};
     //! If set, add any excess from changeless spends to the specified recipient output index instead of to fees and do not count it as waste.
     std::optional<uint32_t> m_add_excess_to_recipient_position;
+    //! If set, excess from changeless spends can not exceed this amount, otherwise use cost_of_change by default
+    std::optional<CAmount> m_max_excess;
 
     CCoinControl();
 
