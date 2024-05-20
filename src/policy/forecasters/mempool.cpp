@@ -6,6 +6,7 @@
 #include <node/miner.h>
 #include <policy/fee_estimator.h>
 #include <policy/forecasters/mempool.h>
+#include <util/trace.h>
 #include <validation.h>
 
 
@@ -41,6 +42,15 @@ ForecastResult MemPoolForecaster::EstimateFee(unsigned int targetBlocks)
     LogPrint(BCLog::ESTIMATEFEE, "FeeEst: %s: Block height %s, 75th percentile feerate %s %s/kvB, 50th percentile feerate %s %s/kvB, 25th percentile feerate %s %s/kvB, 5th percentile feerate %s %s/kvB \n",
              forecastTypeToString(m_forecastType), forecast_options.block_height, fee_rate_estimate_result.p75.GetFeePerK(), CURRENCY_ATOM, fee_rate_estimate_result.p50.GetFeePerK(), CURRENCY_ATOM,
              fee_rate_estimate_result.p25.GetFeePerK(), CURRENCY_ATOM, fee_rate_estimate_result.p5.GetFeePerK(), CURRENCY_ATOM);
+
+    TRACE7(feerate_forecast, forecast_generated,
+           targetBlocks,
+           forecast_options.block_height,
+           forecastTypeToString(m_forecastType).c_str(),
+           fee_rate_estimate_result.p5.GetFeePerK(),
+           fee_rate_estimate_result.p25.GetFeePerK(),
+           fee_rate_estimate_result.p50.GetFeePerK(),
+           fee_rate_estimate_result.p75.GetFeePerK());
 
     cache.update(fee_rate_estimate_result);
     forecast_options.low_priority_estimate = fee_rate_estimate_result.p25;
