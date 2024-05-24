@@ -975,12 +975,14 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     int nBind = std::max(nUserBind, size_t(1));
     // Maximum number of connections with other nodes, this accounts for all types of outbounds and inbounds except for manual
     nUserMaxConnections = args.GetIntArg("-maxconnections", DEFAULT_MAX_PEER_CONNECTIONS);
-    nMaxConnections = std::max(nUserMaxConnections, 0);
+    if (nUserMaxConnections < 0){
+        return InitError(Untranslated("-maxconnections must be greater or equal than zero"));
+    }
     // Reserve enough FDs to account for the bare minimum, plus any manual connections, plus the bound interfaces
     int min_required_fds = MIN_CORE_FDS + MAX_ADDNODE_CONNECTIONS + nBind;
 
     // Try raising the FD limit to what we need (available_fds may be smaller than the requested amount if this fails)
-    available_fds = RaiseFileDescriptorLimit(nMaxConnections + min_required_fds);
+    available_fds = RaiseFileDescriptorLimit(nUserMaxConnections + min_required_fds);
     // If we are using select instead of poll, our actual limit may be even smaller
 #ifndef USE_POLL
     available_fds = std::min(FD_SETSIZE, available_fds);
@@ -989,7 +991,7 @@ bool AppInitParameterInteraction(const ArgsManager& args)
         return InitError(strprintf(_("Not enough file descriptors available. %d available, %d required."), available_fds, min_required_fds));
 
     // Trim requested connection counts, to fit into system limitations
-    nMaxConnections = std::min(available_fds - min_required_fds, nMaxConnections);
+    nMaxConnections = std::min(available_fds - min_required_fds, nUserMaxConnections);
 
     if (nMaxConnections < nUserMaxConnections)
         InitWarning(strprintf(_("Reducing -maxconnections from %d to %d, because of system limitations."), nUserMaxConnections, nMaxConnections));
