@@ -141,12 +141,15 @@ public:
         return ReconciliationRegisterResult::SUCCESS;
     }
 
-    bool AddToSet(NodeId peer_id, const Wtxid& wtxid) EXCLUSIVE_LOCKS_REQUIRED(!m_txreconciliation_mutex)
+    AddToSetResult AddToSet(NodeId peer_id, const Wtxid& wtxid) EXCLUSIVE_LOCKS_REQUIRED(!m_txreconciliation_mutex)
     {
         AssertLockNotHeld(m_txreconciliation_mutex);
         LOCK(m_txreconciliation_mutex);
         auto peer_state = GetRegisteredPeerState(peer_id);
-        if (!peer_state) return false;
+        if (!peer_state) return AddToSetResult::Failed();
+
+        // TODO: We should compute the short_id here here first and see if there's any collision
+        // if so, return AddToSetResult::Collision(wtxid)
 
         // Check if the reconciliation set is not at capacity for two reasons:
         // - limit sizes of reconciliation sets and short id mappings;
@@ -159,7 +162,7 @@ public:
         // However, exploiting (2) should not prevent us from relaying certain transactions.
         //
         // Transactions which don't make it to the set due to the limit are announced via fan-out.
-        if (peer_state->m_local_set.size() >= MAX_RECONSET_SIZE) return false;
+        if (peer_state->m_local_set.size() >= MAX_RECONSET_SIZE) return AddToSetResult::Failed();
 
         // The caller currently keeps track of the per-peer transaction announcements, so it
         // should not attempt to add same tx to the set twice. However, if that happens, we will
@@ -169,7 +172,7 @@ public:
                                                                         "Now the set contains %i transactions.\n",
                           wtxid.ToString(), peer_id, peer_state->m_local_set.size());
         }
-        return true;
+        return AddToSetResult::Succeeded();
     }
 
     bool TryRemovingFromSet(NodeId peer_id, const Wtxid& wtxid) EXCLUSIVE_LOCKS_REQUIRED(!m_txreconciliation_mutex)
@@ -215,6 +218,23 @@ public:
     }
 };
 
+AddToSetResult::AddToSetResult(bool succeeded, std::optional<Wtxid> conflict) {
+    m_succeeded = succeeded;
+    m_conflict = conflict;
+}
+
+AddToSetResult AddToSetResult::Succeeded() {
+    return AddToSetResult(true, std::nullopt);
+}
+
+AddToSetResult AddToSetResult::Failed() {
+    return AddToSetResult(false, std::nullopt);
+}
+
+AddToSetResult AddToSetResult::Collision(Wtxid wtxid) {
+    return AddToSetResult(false, std::make_optional(wtxid));
+}
+
 TxReconciliationTracker::TxReconciliationTracker(uint32_t recon_version) : m_impl{std::make_unique<TxReconciliationTracker::Impl>(recon_version)} {}
 
 TxReconciliationTracker::~TxReconciliationTracker() = default;
@@ -230,7 +250,7 @@ ReconciliationRegisterResult TxReconciliationTracker::RegisterPeer(NodeId peer_i
     return m_impl->RegisterPeer(peer_id, is_peer_inbound, peer_recon_version, remote_salt);
 }
 
-bool TxReconciliationTracker::AddToSet(NodeId peer_id, const Wtxid& wtxid)
+AddToSetResult TxReconciliationTracker::AddToSet(NodeId peer_id, const Wtxid& wtxid)
 {
     return m_impl->AddToSet(peer_id, wtxid);
 }
