@@ -144,14 +144,12 @@ private:
 public:
     explicit Impl(uint32_t recon_version, CSipHasher hasher) : m_recon_version(recon_version), m_deterministic_randomizer(std::move(hasher)) {}
 
-    uint64_t PreRegisterPeer(NodeId peer_id) EXCLUSIVE_LOCKS_REQUIRED(!m_txreconciliation_mutex)
+    uint64_t PreRegisterPeer(NodeId peer_id, uint64_t local_salt) EXCLUSIVE_LOCKS_REQUIRED(!m_txreconciliation_mutex)
     {
         AssertLockNotHeld(m_txreconciliation_mutex);
         LOCK(m_txreconciliation_mutex);
 
         LogPrintLevel(BCLog::TXRECONCILIATION, BCLog::Level::Debug, "Pre-register peer=%d\n", peer_id);
-        const uint64_t local_salt{GetRand(UINT64_MAX)};
-
         // We do this exactly once per peer (which are unique by NodeId, see GetNewNodeId) so it's
         // safe to assume we don't have this record yet.
         Assume(m_states.emplace(peer_id, local_salt).second);
@@ -197,6 +195,29 @@ public:
         return ReconciliationRegisterResult::SUCCESS;
     }
 
+    bool HasCollisionInternal(TxReconciliationState *peer_state, const Wtxid& wtxid, Wtxid& collision, uint32_t &short_id) EXCLUSIVE_LOCKS_REQUIRED(m_txreconciliation_mutex) {
+        AssertLockHeld(m_txreconciliation_mutex);
+
+        short_id = peer_state->ComputeShortID(wtxid);
+        const auto iter = peer_state->m_short_id_mapping.find(short_id);
+
+        if (iter != peer_state->m_short_id_mapping.end()) {
+            collision = iter->second;
+            return true;
+        }
+
+        return false;
+    }
+
+    bool HasCollision(NodeId peer_id, const Wtxid& wtxid, Wtxid& collision, uint32_t &short_id) EXCLUSIVE_LOCKS_REQUIRED(!m_txreconciliation_mutex) {
+        AssertLockNotHeld(m_txreconciliation_mutex);
+        LOCK(m_txreconciliation_mutex);
+        const auto peer_state = GetRegisteredPeerState(peer_id);
+        if (!peer_state) return false;
+
+        return HasCollisionInternal(peer_state, wtxid, collision, short_id);
+    }
+
     AddToSetResult AddToSet(NodeId peer_id, const Wtxid& wtxid) EXCLUSIVE_LOCKS_REQUIRED(!m_txreconciliation_mutex)
     {
         AssertLockNotHeld(m_txreconciliation_mutex);
@@ -204,8 +225,20 @@ public:
         auto peer_state = GetRegisteredPeerState(peer_id);
         if (!peer_state) return AddToSetResult::Failed();
 
-        // TODO: We should compute the short_id here here first and see if there's any collision
-        // if so, return AddToSetResult::Collision(wtxid)
+        // Bypass if the wtxid is already in the set
+        if (peer_state->m_local_set.find(wtxid) != peer_state->m_local_set.end()) {
+            LogPrintLevel(BCLog::TXRECONCILIATION, BCLog::Level::Debug, "%s already in reconciliation set for peer=%d. Bypassing.\n",
+                          wtxid.ToString(), peer_id);
+            return AddToSetResult::Succeeded();
+        }
+
+        // Make sure there is no short id collision between the wtxid we are trying to add
+        // and any existing one in the reconciliation set
+        Wtxid collision;
+        uint32_t short_id;
+        if (HasCollisionInternal(peer_state, wtxid, collision, short_id)) {
+            return AddToSetResult::Collision(collision);
+        }
 
         // Check if the reconciliation set is not at capacity for two reasons:
         // - limit sizes of reconciliation sets and short id mappings;
@@ -224,6 +257,7 @@ public:
         // should not attempt to add same tx to the set twice. However, if that happens, we will
         // simply ignore it.
         if (peer_state->m_local_set.insert(wtxid).second) {
+            peer_state->m_short_id_mapping.emplace(short_id, wtxid);
             LogPrintLevel(BCLog::TXRECONCILIATION, BCLog::Level::Debug, "Added %s to the reconciliation set for peer=%d. " /* Continued */
                                                                         "Now the set contains %i transactions.\n",
                           wtxid.ToString(), peer_id, peer_state->m_local_set.size());
@@ -240,6 +274,7 @@ public:
 
         auto removed = peer_state->m_local_set.erase(wtxid) > 0;
         if (removed) {
+            peer_state->m_short_id_mapping.erase(peer_state->ComputeShortID(wtxid));
             LogPrintLevel(BCLog::TXRECONCILIATION, BCLog::Level::Debug, "Removed %s from the reconciliation set for peer=%d. " /* Continued */
                                                                         "Now the set contains %i transactions.\n",
                           wtxid.ToString(), peer_id, peer_state->m_local_set.size());
@@ -397,13 +432,24 @@ TxReconciliationTracker::~TxReconciliationTracker() = default;
 
 uint64_t TxReconciliationTracker::PreRegisterPeer(NodeId peer_id)
 {
-    return m_impl->PreRegisterPeer(peer_id);
+    const uint64_t local_salt{GetRand(UINT64_MAX)};
+    return m_impl->PreRegisterPeer(peer_id, local_salt);
+}
+
+void TxReconciliationTracker::PreRegisterPeerWithSalt(NodeId peer_id, uint64_t local_salt)
+{
+    m_impl->PreRegisterPeer(peer_id, local_salt);
 }
 
 ReconciliationRegisterResult TxReconciliationTracker::RegisterPeer(NodeId peer_id, bool is_peer_inbound,
                                                           uint32_t peer_recon_version, uint64_t remote_salt)
 {
     return m_impl->RegisterPeer(peer_id, is_peer_inbound, peer_recon_version, remote_salt);
+}
+
+bool TxReconciliationTracker::HasCollision(NodeId peer_id, const Wtxid& wtxid, Wtxid& collision, uint32_t &short_id)
+{
+    return m_impl->HasCollision(peer_id, wtxid, collision, short_id);
 }
 
 AddToSetResult TxReconciliationTracker::AddToSet(NodeId peer_id, const Wtxid& wtxid)
