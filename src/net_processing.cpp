@@ -6192,8 +6192,29 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                             }
                         }
 
-                        if (fanout || !m_txreconciliation->AddToSet(pto->GetId(), wtxid).m_succeeded) {
+                        if (fanout) {
                             vInv.push_back(inv);
+                        } else {
+                            // If the transactions fails to get into the set, we fanout
+                            auto result = m_txreconciliation->AddToSet(pto->GetId(), wtxid);
+                            if (!result.m_succeeded) {
+                                vInv.push_back(inv);
+                                // If the transaction fails because it collides with an existing one,
+                                // we also remove and fanout the conflict and all its descendants.
+                                // This is because our peer may have added the conflicting tranaction
+                                // to its set, in which reconciliation of these two would fail
+                                auto collision = result.m_conflict;
+                                if (collision.has_value()) {
+                                    Assume(peer->m_wtxid_relay);
+                                    CTxMemPool::setEntries descendants;
+                                    m_mempool.CalculateDescendants(m_mempool.get_iter_from_wtxid(collision.value()), descendants);
+                                    for (const auto &txit: descendants) {
+                                        auto wtxid = txit->GetTx().GetWitnessHash();
+                                        m_txreconciliation->TryRemovingFromSet(pto->GetId(), wtxid);
+                                        vInv.emplace_back(MSG_WTX, wtxid);
+                                    }
+                                }
+                            }
                         }
 
                         nRelayedTransactions++;

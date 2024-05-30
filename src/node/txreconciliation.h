@@ -91,6 +91,12 @@ public:
      */
     uint64_t PreRegisterPeer(NodeId peer_id);
 
+
+    /**
+     * For testing purposes only. This SHOULD NEVER be used in production.
+    */
+    void PreRegisterPeerWithSalt(NodeId peer_id, uint64_t local_salt);
+
     /**
      * Step 0. Once the peer agreed to reconcile txs with us, generate the state required to track
      * ongoing reconciliations. Must be called only after pre-registering the peer and only once.
@@ -104,6 +110,11 @@ public:
      * Returns whether the transaction appears in the set.
      */
     AddToSetResult AddToSet(NodeId peer_id, const Wtxid& wtxid);
+
+    /**
+     * Checks whether a wtxid has a short id collision in the peer's reconciliation set.
+    */
+   bool HasCollision(NodeId peer_id, const Wtxid& wtxid, Wtxid& collision, uint32_t &short_id);
 
     /**
      * Before Step 2, we might want to remove a wtxid from the reconciliation set, for example if
