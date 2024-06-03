@@ -20,9 +20,9 @@ from test_framework.util import (
 def rpccall(node, user, method, password=None):
     url = urllib.parse.urlparse(node.url)
     if password is not None:
-        auth_value = str_to_b64str('{}:{}'.format(user, password))
+        auth_value = str_to_b64str(f'{user}:{password}')
     else:
-        auth_value = str_to_b64str('{}:{}'.format(user[0], user[3]))
+        auth_value = str_to_b64str(f'{user[0]}:{user[3]}')
     headers = {"Authorization": "Basic " + auth_value}
     conn = http.client.HTTPConnection(url.hostname, url.port)
     conn.connect()
