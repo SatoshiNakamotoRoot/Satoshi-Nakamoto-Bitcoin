@@ -15,6 +15,7 @@
 #include <util/insert.h>
 #include <util/result.h>
 
+#include <bitset>
 #include <optional>
 
 
@@ -134,6 +135,16 @@ public:
     bool HasEffectiveValue() const { return effective_value.has_value(); }
 };
 
+enum class SelectionAlgorithm : uint8_t
+{
+    BNB = 0,
+    KNAPSACK = 1,
+    SRD = 2,
+    CG = 3,
+    MANUAL = 4,
+    NUM_ELEMENTS,
+};
+
 /** Parameters for one iteration of Coin Selection. */
 struct CoinSelectionParams {
     /** Randomness to use in the context of coin selection. */
@@ -174,6 +185,20 @@ struct CoinSelectionParams {
      * 1) Received from other wallets, 2) replacing other txs, 3) that have been replaced.
      */
     bool m_include_unsafe_inputs = false;
+    /***
+     * The array of enabled coin selection algorithms. An enabled algorithm will have the index corresponding
+     * to its SelectionAlgorithm enum value set to true. By default all algorithms are enabled.
+    */
+    std::bitset<size_t(SelectionAlgorithm::NUM_ELEMENTS)> m_enable_algos{std::numeric_limits<size_t>::max()};
+    /***
+     * When set, excess value for changeless results will be added to the target amount at the given position
+     * and not counted as waste. Otherwise excess value will be be applied to fees and counted as waste.
+    */
+    std::optional<uint32_t> m_add_excess_to_recipient_position;
+    /***
+     * amount that changeless spends can exceed the target amount.
+    */
+    CAmount m_max_excess{0};
 
     CoinSelectionParams(FastRandomContext& rng_fast, size_t change_output_size, size_t change_spend_size,
                         CAmount min_change_target, CFeeRate effective_feerate,
@@ -306,16 +331,9 @@ typedef std::map<CoinEligibilityFilter, OutputGroupTypeMap> FilteredOutputGroups
  */
 [[nodiscard]] CAmount GenerateChangeTarget(const CAmount payment_value, const CAmount change_fee, FastRandomContext& rng);
 
-enum class SelectionAlgorithm : uint8_t
-{
-    BNB = 0,
-    KNAPSACK = 1,
-    SRD = 2,
-    CG = 3,
-    MANUAL = 4,
-};
-
 std::string GetAlgorithmName(const SelectionAlgorithm algo);
+
+std::optional<size_t> GetAlgorithmIndex(const std::string name);
 
 struct SelectionResult
 {
@@ -387,6 +405,9 @@ public:
     /** How much individual inputs overestimated the bump fees for shared ancestries */
     void SetBumpFeeDiscount(const CAmount discount);
 
+    /** Reset target to the current selected amount */
+    CAmount ResetTargetToSelectedValue();
+
     /** Calculates and stores the waste for this selection via GetSelectionWaste */
     void ComputeAndSetWaste(const CAmount min_viable_change, const CAmount change_cost, const CAmount change_fee);
     [[nodiscard]] CAmount GetWaste() const;
@@ -444,8 +465,8 @@ public:
     int GetWeight() const { return m_weight; }
 };
 
-util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& cost_of_change,
-                                             int max_weight);
+util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& max_excess,
+                                             int max_weight, const bool add_excess_to_target);
 
 util::Result<SelectionResult> CoinGrinder(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, CAmount change_target, int max_weight);
 

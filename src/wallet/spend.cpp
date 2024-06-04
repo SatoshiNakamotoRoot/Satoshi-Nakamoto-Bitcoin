@@ -694,33 +694,41 @@ util::Result<SelectionResult> ChooseSelectionResult(interfaces::Chain& chain, co
     // Maximum allowed weight
     int max_inputs_weight = MAX_STANDARD_TX_WEIGHT - (coin_selection_params.tx_noinputs_size * WITNESS_SCALE_FACTOR);
 
-    // SFFO frequently causes issues in the context of changeless input sets: skip BnB when SFFO is active
-    if (!coin_selection_params.m_subtract_fee_outputs) {
-        if (auto bnb_result{SelectCoinsBnB(groups.positive_group, nTargetValue, coin_selection_params.m_cost_of_change, max_inputs_weight)}) {
-            results.push_back(*bnb_result);
-        } else append_error(std::move(bnb_result));
+    if (coin_selection_params.m_enable_algos.test(size_t(SelectionAlgorithm::BNB))) {
+        // SFFO frequently causes issues in the context of changeless input sets: skip BnB when SFFO is active
+        if (!coin_selection_params.m_subtract_fee_outputs) {
+            if (auto bnb_result{SelectCoinsBnB(groups.positive_group, nTargetValue, coin_selection_params.m_max_excess, max_inputs_weight, coin_selection_params.m_add_excess_to_recipient_position.has_value())}) {
+                results.push_back(*bnb_result);
+            } else append_error(std::move(bnb_result));
+        }
     }
 
     // As Knapsack and SRD can create change, also deduce change weight.
     max_inputs_weight -= (coin_selection_params.change_output_size * WITNESS_SCALE_FACTOR);
 
-    // The knapsack solver has some legacy behavior where it will spend dust outputs. We retain this behavior, so don't filter for positive only here.
-    if (auto knapsack_result{KnapsackSolver(groups.mixed_group, nTargetValue, coin_selection_params.m_min_change_target, coin_selection_params.rng_fast, max_inputs_weight)}) {
-        results.push_back(*knapsack_result);
-    } else append_error(std::move(knapsack_result));
+    if (coin_selection_params.m_enable_algos.test(size_t(SelectionAlgorithm::KNAPSACK))) {
+        // The knapsack solver has some legacy behavior where it will spend dust outputs. We retain this behavior, so don't filter for positive only here.
+        if (auto knapsack_result{KnapsackSolver(groups.mixed_group, nTargetValue, coin_selection_params.m_min_change_target, coin_selection_params.rng_fast, max_inputs_weight)}) {
+            results.push_back(*knapsack_result);
+        } else append_error(std::move(knapsack_result));
+    }
 
-    if (coin_selection_params.m_effective_feerate > CFeeRate{3 * coin_selection_params.m_long_term_feerate}) { // Minimize input set for feerates of at least 3×LTFRE (default: 30 ṩ/vB+)
-        if (auto cg_result{CoinGrinder(groups.positive_group, nTargetValue, coin_selection_params.m_min_change_target, max_inputs_weight)}) {
-            cg_result->ComputeAndSetWaste(coin_selection_params.min_viable_change, coin_selection_params.m_cost_of_change, coin_selection_params.m_change_fee);
-            results.push_back(*cg_result);
-        } else {
-            append_error(std::move(cg_result));
+    if (coin_selection_params.m_enable_algos.test(size_t(SelectionAlgorithm::CG))) {
+        if (coin_selection_params.m_effective_feerate > CFeeRate{3 * coin_selection_params.m_long_term_feerate}) { // Minimize input set for feerates of at least 3×LTFRE (default: 30 ṩ/vB+)
+            if (auto cg_result{CoinGrinder(groups.positive_group, nTargetValue, coin_selection_params.m_min_change_target, max_inputs_weight)}) {
+                cg_result->ComputeAndSetWaste(coin_selection_params.min_viable_change, coin_selection_params.m_cost_of_change, coin_selection_params.m_change_fee);
+                results.push_back(*cg_result);
+            } else {
+                append_error(std::move(cg_result));
+            }
         }
     }
 
-    if (auto srd_result{SelectCoinsSRD(groups.positive_group, nTargetValue, coin_selection_params.m_change_fee, coin_selection_params.rng_fast, max_inputs_weight)}) {
-        results.push_back(*srd_result);
-    } else append_error(std::move(srd_result));
+    if (coin_selection_params.m_enable_algos.test(size_t(SelectionAlgorithm::SRD))) {
+        if (auto srd_result{SelectCoinsSRD(groups.positive_group, nTargetValue, coin_selection_params.m_change_fee, coin_selection_params.rng_fast, max_inputs_weight)}) {
+            results.push_back(*srd_result);
+        } else append_error(std::move(srd_result));
+    }
 
     if (results.empty()) {
         // No solution found, retrieve the first explicit error (if any).
@@ -1075,7 +1083,17 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
     coin_selection_params.m_change_fee = coin_selection_params.m_effective_feerate.GetFee(coin_selection_params.change_output_size);
     coin_selection_params.m_cost_of_change = coin_selection_params.m_discard_feerate.GetFee(coin_selection_params.change_spend_size) + coin_selection_params.m_change_fee;
 
-    coin_selection_params.m_min_change_target = GenerateChangeTarget(std::floor(recipients_sum / vecSend.size()), coin_selection_params.m_change_fee, rng_fast);
+    if (coin_control.m_change_target) {
+        coin_selection_params.m_min_change_target = coin_control.m_change_target.value();
+    } else {
+        coin_selection_params.m_min_change_target = GenerateChangeTarget(std::floor(recipients_sum / vecSend.size()), coin_selection_params.m_change_fee, rng_fast);
+    }
+
+    if (coin_control.m_max_excess) {
+        coin_selection_params.m_max_excess = coin_control.m_max_excess.value();
+    } else {
+        coin_selection_params.m_max_excess = coin_selection_params.m_cost_of_change;
+    }
 
     // The smallest change amount should be:
     // 1. at least equal to dust threshold
@@ -1086,6 +1104,12 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
 
     // Static vsize overhead + outputs vsize. 4 nVersion, 4 nLocktime, 1 input count, 1 witness overhead (dummy, flag, stack size)
     coin_selection_params.tx_noinputs_size = 10 + GetSizeOfCompactSize(vecSend.size()); // bytes for output count
+
+    // All algorithms, or a subset of algorithms enabled by the user
+    coin_selection_params.m_enable_algos = coin_control.m_enable_algos;
+
+    // If set, do not add any excess from a changeless transaction to fees
+    coin_selection_params.m_add_excess_to_recipient_position = coin_control.m_add_excess_to_recipient_position;
 
     // vouts to the payees
     for (const auto& recipient : vecSend)
@@ -1141,7 +1165,13 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
            result.GetWaste(),
            result.GetSelectedValue());
 
-    const CAmount change_amount = result.GetChange(coin_selection_params.min_viable_change, coin_selection_params.m_change_fee);
+    if (result.GetTarget() != selection_target && coin_selection_params.m_add_excess_to_recipient_position) {
+        auto excess = result.GetTarget() - selection_target;
+        txNew.vout[coin_selection_params.m_add_excess_to_recipient_position.value()].nValue += excess;
+        recipients_sum += excess;
+    }
+
+    CAmount change_amount = result.GetChange(coin_selection_params.min_viable_change, coin_selection_params.m_change_fee);
     if (change_amount > 0) {
         CTxOut newTxOut(change_amount, scriptChange);
         if (!change_pos) {

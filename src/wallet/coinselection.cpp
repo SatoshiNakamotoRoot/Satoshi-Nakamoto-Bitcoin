@@ -85,13 +85,14 @@ struct {
  * @param const CAmount& cost_of_change This is the cost of creating and spending a change output.
  *        This plus selection_target is the upper bound of the range.
  * @param int max_weight The maximum weight available for the input set.
+ * @param bool add_excess_to_target When true do not count excess as waste and add to the result target
  * @returns The result of this coin selection algorithm, or std::nullopt
  */
 
 static const size_t TOTAL_TRIES = 100000;
 
-util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& cost_of_change,
-                                             int max_weight)
+util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool, const CAmount& selection_target, const CAmount& max_excess,
+                                             int max_weight, const bool add_excess_to_target)
 {
     SelectionResult result(selection_target, SelectionAlgorithm::BNB);
     CAmount curr_value = 0;
@@ -125,7 +126,7 @@ util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool
         // Conditions for starting a backtrack
         bool backtrack = false;
         if (curr_value + curr_available_value < selection_target || // Cannot possibly reach target with the amount remaining in the curr_available_value.
-            curr_value > selection_target + cost_of_change || // Selected value is out of range, go back and try other branch
+            curr_value > selection_target + max_excess || // Selected value is out of range, go back and try other branch
             (curr_waste > best_waste && is_feerate_high)) { // Don't select things which we know will be more wasteful if the waste is increasing
             backtrack = true;
         } else if (curr_selection_weight > max_weight) { // Exceeding weight for standard tx, cannot find more solutions by adding more inputs
@@ -194,7 +195,12 @@ util::Result<SelectionResult> SelectCoinsBnB(std::vector<OutputGroup>& utxo_pool
     for (const size_t& i : best_selection) {
         result.AddInput(utxo_pool.at(i));
     }
-    result.ComputeAndSetWaste(cost_of_change, cost_of_change, CAmount{0});
+
+    if (add_excess_to_target) {
+        auto excess = result.ResetTargetToSelectedValue();
+        best_waste -= excess;
+    }
+    result.ComputeAndSetWaste(max_excess, max_excess, CAmount{0});
     assert(best_waste == result.GetWaste());
 
     return result;
@@ -851,6 +857,13 @@ void SelectionResult::ComputeAndSetWaste(const CAmount min_viable_change, const 
     }
 }
 
+CAmount SelectionResult::ResetTargetToSelectedValue()
+{
+    CAmount excess = (m_use_effective ? GetSelectedEffectiveValue(): GetSelectedValue()) - m_target;
+    m_target += excess;
+    return excess;
+}
+
 void SelectionResult::SetAlgoCompleted(bool algo_completed)
 {
     m_algo_completed = algo_completed;
@@ -966,9 +979,20 @@ std::string GetAlgorithmName(const SelectionAlgorithm algo)
     case SelectionAlgorithm::SRD: return "srd";
     case SelectionAlgorithm::CG: return "cg";
     case SelectionAlgorithm::MANUAL: return "manual";
+    case SelectionAlgorithm::NUM_ELEMENTS: assert(false);
     // No default case to allow for compiler to warn
     }
     assert(false);
+}
+
+std::optional<size_t> GetAlgorithmIndex(const std::string name)
+{
+    if (name == "bnb") return std::optional(size_t(SelectionAlgorithm::BNB));
+    if (name == "knapsack") return std::optional(size_t(SelectionAlgorithm::KNAPSACK));
+    if (name == "srd") return std::optional(size_t(SelectionAlgorithm::SRD));
+    if (name == "cg") return std::optional(size_t(SelectionAlgorithm::CG));
+    if (name == "manual") return std::optional(size_t(SelectionAlgorithm::MANUAL));
+    else return std::nullopt;
 }
 
 CAmount SelectionResult::GetChange(const CAmount min_viable_change, const CAmount change_fee) const
