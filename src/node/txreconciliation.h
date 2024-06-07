@@ -139,6 +139,12 @@ public:
      */
     bool ShouldFanoutTo(const Wtxid& wtxid, NodeId peer_id,
                         size_t inbounds_fanout_tx_relay, size_t outbounds_fanout_tx_relay);
+
+    /**
+     * Returns a collections of node ids sorted by how many parents the peer has in its reconciliation set
+     * (from less to more)
+    */
+    std::vector<NodeId> SortPeersByFewestParents(std::vector<Wtxid> parents);
 };
 
 #endif // BITCOIN_NODE_TXRECONCILIATION_H
