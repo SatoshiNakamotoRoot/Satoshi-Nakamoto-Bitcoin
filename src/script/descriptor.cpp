@@ -1319,6 +1319,24 @@ public:
     }
 };
 
+/** A parsed rawnode(...) descriptor */
+class RawNodeDescriptor final : public DescriptorImpl
+{
+    std::vector<unsigned char> m_bytes;
+protected:
+    std::string ToStringExtra() const override { return HexStr(m_bytes); }
+    std::vector<CScript> MakeScripts(const std::vector<CPubKey>&, Span<const CScript>, FlatSigningProvider&) const override { return Vector(CScript(m_bytes.begin(), m_bytes.end())); }
+public:
+    RawNodeDescriptor(std::vector<unsigned char> bytes) : DescriptorImpl({}, "rawnode"), m_bytes(std::move(bytes)) {}
+
+    bool IsSolvable() const final { return false; }
+
+    bool IsSingleType() const final { return true; }
+    bool ToPrivateString(const SigningProvider& arg, std::string& out) const final { return false; }
+
+    std::optional<int64_t> ScriptSize() const override { return m_bytes.size(); }
+};
+
 ////////////////////////////////////////////////////////////////////////////
 // Parser                                                                 //
 ////////////////////////////////////////////////////////////////////////////
@@ -1790,6 +1808,11 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
                 node.depth = branches.size();
                 node.leaf_version = TAPROOT_LEAF_TAPSCRIPT;
                 node.type = TRNodeType::LEAF_SCRIPT;
+
+                if (dynamic_cast<RawNodeDescriptor*>(subscripts.back().get())) {
+                    node.type = TRNodeType::NODE_HASH;
+                }
+
                 depths.push_back(node.depth);
                 nodes.push_back(node);
                 // Process closing braces; one is expected for every right branch we were in.
@@ -1845,6 +1868,22 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
         return std::make_unique<RawDescriptor>(CScript(bytes.begin(), bytes.end()));
     } else if (Func("raw", expr)) {
         error = "Can only have raw() at top level";
+        return nullptr;
+    }
+    if (ctx == ParseScriptContext::P2TR && Func("rawnode", expr)) {
+        std::string str(expr.begin(), expr.end());
+        if (!IsHex(str)) {
+            error = "Rawnode hash is not hex";
+            return nullptr;
+        }
+        auto bytes = ParseHex(str);
+        if (bytes.size() != 32) {
+            error = "256 bits digest expected";
+            return nullptr;
+        }
+        return std::make_unique<RawNodeDescriptor>(bytes);
+    } else if (Func("rawnode", expr)) {
+        error = "Can only have rawnode() inside tr()";
         return nullptr;
     }
     // Process miniscript expressions.
@@ -2028,6 +2067,17 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
                     auto key = InferXOnlyPubkey(tap.internal_key, ParseScriptContext::P2TR, provider);
                     return std::make_unique<TRDescriptor>(std::move(key), std::move(subscripts), std::move(nodes));
                 }
+            }
+            // If the tree is empty but it has a merkle root, infer the merkle root as a rawnode()
+            if (!tap.merkle_root.IsNull()) {
+                auto key = InferXOnlyPubkey(tap.internal_key, ParseScriptContext::P2TR, provider);
+                std::vector<unsigned char> merkle_root_bytes;
+                std::copy(tap.merkle_root.begin(), tap.merkle_root.end(), std::back_inserter(merkle_root_bytes));
+                std::vector<std::unique_ptr<DescriptorImpl>> descs;
+                descs.push_back(std::make_unique<RawNodeDescriptor>(merkle_root_bytes));
+                std::vector<TRNodeInfo> nodes;
+                nodes.push_back(TRNodeInfo{.depth = 0, .leaf_version = 0, .type = TRNodeType::NODE_HASH});
+                return std::make_unique<TRDescriptor>(std::move(key), std::move(descs), std::move(nodes));
             }
         }
         // If the above doesn't work, construct a rawtr() descriptor with just the encoded x-only pubkey.
