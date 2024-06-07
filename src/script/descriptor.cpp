@@ -1087,17 +1087,36 @@ public:
     }
 };
 
+/** Represents the type of a node in taproot descriptor script tree */
+enum TRNodeType {
+    LEAF_SCRIPT,
+    NODE_HASH
+};
+
+/** A struct hold information on a node taproot descriptor script tree */
+struct TRNodeInfo {
+    int depth;
+    int leaf_version;
+    TRNodeType type;
+};
+
 /** A parsed tr(...) descriptor. */
 class TRDescriptor final : public DescriptorImpl
 {
-    std::vector<int> m_depths;
+    std::vector<TRNodeInfo> m_nodes;
 protected:
     std::vector<CScript> MakeScripts(const std::vector<CPubKey>& keys, Span<const CScript> scripts, FlatSigningProvider& out) const override
     {
         TaprootBuilder builder;
-        assert(m_depths.size() == scripts.size());
-        for (size_t pos = 0; pos < m_depths.size(); ++pos) {
-            builder.Add(m_depths[pos], scripts[pos], TAPROOT_LEAF_TAPSCRIPT);
+        assert(m_nodes.size() == scripts.size());
+        for (size_t pos = 0; pos < m_nodes.size(); ++pos) {
+            if (m_nodes[pos].type == TRNodeType::NODE_HASH) {
+                builder.AddOmitted(m_nodes[pos].depth, uint256(Span(scripts[pos])));
+            } else if (m_nodes[pos].type == TRNodeType::LEAF_SCRIPT) {
+                builder.Add(m_nodes[pos].depth, scripts[pos], m_nodes[pos].leaf_version);
+            } else {
+                assert(false);
+            }
         }
         if (!builder.IsComplete()) return {};
         assert(keys.size() == 1);
@@ -1111,11 +1130,11 @@ protected:
     }
     bool ToStringSubScriptHelper(const SigningProvider* arg, std::string& ret, const StringType type, const DescriptorCache* cache = nullptr) const override
     {
-        if (m_depths.empty()) return true;
+        if (m_nodes.empty()) return true;
         std::vector<bool> path;
-        for (size_t pos = 0; pos < m_depths.size(); ++pos) {
+        for (size_t pos = 0; pos < m_nodes.size(); ++pos) {
             if (pos) ret += ',';
-            while ((int)path.size() <= m_depths[pos]) {
+            while ((int)path.size() <= m_nodes[pos].depth) {
                 if (path.size()) ret += '{';
                 path.push_back(false);
             }
@@ -1131,10 +1150,10 @@ protected:
         return true;
     }
 public:
-    TRDescriptor(std::unique_ptr<PubkeyProvider> internal_key, std::vector<std::unique_ptr<DescriptorImpl>> descs, std::vector<int> depths) :
-        DescriptorImpl(Vector(std::move(internal_key)), std::move(descs), "tr"), m_depths(std::move(depths))
+    TRDescriptor(std::unique_ptr<PubkeyProvider> internal_key, std::vector<std::unique_ptr<DescriptorImpl>> descs, std::vector<TRNodeInfo> nodes) :
+        DescriptorImpl(Vector(std::move(internal_key)), std::move(descs), "tr"), m_nodes(std::move(nodes))
     {
-        assert(m_subdescriptor_args.size() == m_depths.size());
+        assert(m_subdescriptor_args.size() == m_nodes.size());
     }
     std::optional<OutputType> GetOutputType() const override { return OutputType::BECH32M; }
     bool IsSingleType() const final { return true; }
@@ -1741,6 +1760,7 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
         }
         ++key_exp_index;
         std::vector<std::unique_ptr<DescriptorImpl>> subscripts; //!< list of script subexpressions
+        std::vector<TRNodeInfo> nodes;
         std::vector<int> depths; //!< depth in the tree of each subexpression (same length subscripts)
         if (expr.size()) {
             if (!Const(",", expr)) {
@@ -1766,7 +1786,12 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
                 auto sarg = Expr(expr);
                 subscripts.emplace_back(ParseScript(key_exp_index, sarg, ParseScriptContext::P2TR, out, error));
                 if (!subscripts.back()) return nullptr;
-                depths.push_back(branches.size());
+                TRNodeInfo node;
+                node.depth = branches.size();
+                node.leaf_version = TAPROOT_LEAF_TAPSCRIPT;
+                node.type = TRNodeType::LEAF_SCRIPT;
+                depths.push_back(node.depth);
+                nodes.push_back(node);
                 // Process closing braces; one is expected for every right branch we were in.
                 while (branches.size() && branches.back()) {
                     if (!Const("}", expr)) {
@@ -1791,7 +1816,7 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t& key_exp_index, Span<const 
             }
         }
         assert(TaprootBuilder::ValidDepths(depths));
-        return std::make_unique<TRDescriptor>(std::move(internal_key), std::move(subscripts), std::move(depths));
+        return std::make_unique<TRDescriptor>(std::move(internal_key), std::move(subscripts), std::move(nodes));
     } else if (Func("tr", expr)) {
         error = "Can only have tr at top level";
         return nullptr;
@@ -1980,9 +2005,14 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
                 // If that works, try to infer subdescriptors for all leaves.
                 bool ok = true;
                 std::vector<std::unique_ptr<DescriptorImpl>> subscripts; //!< list of script subexpressions
-                std::vector<int> depths; //!< depth in the tree of each subexpression (same length subscripts)
+                std::vector<TRNodeInfo> nodes;
                 for (const auto& [depth, script, leaf_ver] : *tree) {
                     std::unique_ptr<DescriptorImpl> subdesc;
+                    TRNodeInfo node;
+                    node.depth = depth;
+                    node.leaf_version = leaf_ver;
+                    node.type = TRNodeType::LEAF_SCRIPT;
+
                     if (leaf_ver == TAPROOT_LEAF_TAPSCRIPT) {
                         subdesc = InferScript(CScript(script.begin(), script.end()), ParseScriptContext::P2TR, provider);
                     }
@@ -1991,12 +2021,12 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
                         break;
                     } else {
                         subscripts.push_back(std::move(subdesc));
-                        depths.push_back(depth);
+                        nodes.push_back(node);
                     }
                 }
                 if (ok) {
                     auto key = InferXOnlyPubkey(tap.internal_key, ParseScriptContext::P2TR, provider);
-                    return std::make_unique<TRDescriptor>(std::move(key), std::move(subscripts), std::move(depths));
+                    return std::make_unique<TRDescriptor>(std::move(key), std::move(subscripts), std::move(nodes));
                 }
             }
         }
