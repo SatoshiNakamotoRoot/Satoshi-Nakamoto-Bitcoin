@@ -280,6 +280,28 @@ the header. Consider removing the unused include.
     Ok(())
 }
 
+fn lint_ptr_cast() -> LintResult {
+    let found = git()
+        .args([
+            "grep",
+            "--extended-regexp",
+            r"\((un)?(signed)? ?char\*\)\s*&",
+        ])
+        .status()
+        .expect("command error")
+        .success();
+    if found {
+        Err(r#"
+^^^
+Direct use of C-style pointer casts may be dangerous and cast away const-ness. Please use
+UCharCast() or reinterpret_cast<>() or similar helpers, which preserve const-ness.
+            "#
+        .to_string())
+    } else {
+        Ok(())
+    }
+}
+
 fn lint_doc() -> LintResult {
     if Command::new("test/lint/check-doc.py")
         .status()
@@ -369,6 +391,7 @@ fn main() -> ExitCode {
         ("trailing whitespace check", lint_trailing_whitespace),
         ("no-tabs check", lint_tabs_whitespace),
         ("build config includes check", lint_includes_build_config),
+        ("non-const C-style pointer cast", lint_ptr_cast),
         ("-help=1 documentation check", lint_doc),
         ("markdown hyperlink check", lint_markdown),
         ("lint-*.py scripts", lint_all),
