@@ -98,7 +98,7 @@ bilingual_str TransactionErrorString(const TransactionError err)
     switch (err) {
         case TransactionError::OK:
             return Untranslated("No error");
-        case TransactionError::MISSING_INPUTS:
+        case TransactionError::INPUTS_MISSING_OR_SPENT:
             return Untranslated("Inputs missing or spent");
         case TransactionError::ALREADY_IN_CHAIN:
             return Untranslated("Transaction already in block chain");

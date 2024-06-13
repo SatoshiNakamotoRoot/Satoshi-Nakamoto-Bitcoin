@@ -16,7 +16,7 @@
 namespace node {
 enum class TransactionError {
     OK, //!< No error
-    MISSING_INPUTS,
+    INPUTS_MISSING_OR_SPENT,
     ALREADY_IN_CHAIN,
     MEMPOOL_REJECTED,
     MEMPOOL_ERROR,

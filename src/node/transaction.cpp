@@ -23,7 +23,7 @@ static TransactionError HandleATMPError(const TxValidationState& state, std::str
     err_string_out = state.ToString();
     if (state.IsInvalid()) {
         if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
-            return TransactionError::MISSING_INPUTS;
+            return TransactionError::INPUTS_MISSING_OR_SPENT;
         }
         return TransactionError::MEMPOOL_REJECTED;
     } else {

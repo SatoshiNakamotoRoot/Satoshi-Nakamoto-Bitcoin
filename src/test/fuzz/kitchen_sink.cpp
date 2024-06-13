@@ -22,7 +22,7 @@ using node::TransactionError;
 
 namespace {
 constexpr TransactionError ALL_TRANSACTION_ERROR[] = {
-    TransactionError::MISSING_INPUTS,
+    TransactionError::INPUTS_MISSING_OR_SPENT,
     TransactionError::ALREADY_IN_CHAIN,
     TransactionError::MEMPOOL_REJECTED,
     TransactionError::MEMPOOL_ERROR,
