@@ -61,6 +61,7 @@ from test_framework.util import (
 from test_framework.wallet_util import generate_keypair
 
 DEFAULT_FEE = Decimal("0.0001")
+BULK_TX_PADDING_OFFSET = 3
 
 class MiniWalletMode(Enum):
     """Determines the transaction type the MiniWallet is creating and spending.
@@ -121,19 +122,19 @@ class MiniWallet:
         return {"txid": txid, "vout": vout, "value": value, "height": height, "coinbase": coinbase, "confirmations": confirmations}
 
     def _bulk_tx(self, tx, target_weight):
-        """Pad a transaction with extra outputs until it reaches a target weight (or higher).
-        returns the tx
+        """Pad a transaction with extra outputs until it reaches a target weight (or higher
+        at most BULK_TX_PADDING_OFFSET WU).
         """
         tx.vout.append(CTxOut(nValue=0, scriptPubKey=CScript([OP_RETURN])))
         # determine number of needed padding bytes by converting weight difference to vbytes
-        dummy_vbytes = (target_weight - tx.get_weight() + 3) // WITNESS_SCALE_FACTOR
+        dummy_vbytes = (target_weight - tx.get_weight() + BULK_TX_PADDING_OFFSET) // WITNESS_SCALE_FACTOR
         # compensate for the increase of the compact-size encoded script length
         # (note that the length encoding of the unpadded output script needs one byte)
         dummy_vbytes -= len(ser_compact_size(dummy_vbytes)) - 1
         tx.vout[-1].scriptPubKey = CScript([OP_RETURN] + [OP_1] * dummy_vbytes)
-        # Actual weight should be at most 3 higher than target weight
+        # Actual weight should be at most BULK_TX_PADDING_OFFSET higher than target weight
         assert_greater_than_or_equal(tx.get_weight(), target_weight)
-        assert_greater_than_or_equal(target_weight + 3, tx.get_weight())
+        assert_greater_than_or_equal(target_weight + BULK_TX_PADDING_OFFSET, tx.get_weight())
 
     def get_balance(self):
         return sum(u['value'] for u in self._utxos)
@@ -376,8 +377,8 @@ class MiniWallet:
         else:
             assert False
         if target_weight and not fee:  # respect fee_rate if target weight is passed
-            # the actual weight might be off by 3 WUs, so calculate based on that (see self._bulk_tx)
-            max_actual_weight = target_weight + 3
+            # the actual weight might be off by BULK_TX_PADDING_OFFSET WUs, so calculate based on that (see self._bulk_tx)
+            max_actual_weight = target_weight + BULK_TX_PADDING_OFFSET
             fee = get_fee(math.ceil(max_actual_weight / WITNESS_SCALE_FACTOR), fee_rate)
         send_value = utxo_to_spend["value"] - (fee or (fee_rate * vsize / 1000))
 

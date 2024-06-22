@@ -17,7 +17,7 @@ class FeatureFrameworkMiniWalletTest(BitcoinTestFramework):
 
     def test_tx_padding(self):
         """Verify that MiniWallet's transaction padding (`target_weight` parameter)
-           works accurately enough (i.e. at most 3 WUs higher) with all modes."""
+           works accurately with all modes."""
         for mode_name, wallet in self.wallets:
             self.log.info(f"Test tx padding with MiniWallet mode {mode_name}...")
             utxo = wallet.get_utxo(mark_as_spent=False)
