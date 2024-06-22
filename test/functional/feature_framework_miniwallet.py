@@ -23,7 +23,9 @@ class FeatureFrameworkMiniWalletTest(BitcoinTestFramework):
             utxo = wallet.get_utxo(mark_as_spent=False)
             for target_weight in [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 4000000,
                                   989,  2001, 4337, 13371, 23219, 49153, 102035, 223419, 3999989]:
-                tx = wallet.create_self_transfer(utxo_to_spend=utxo, target_weight=target_weight)["tx"]
+                tx = wallet.create_self_transfer(utxo_to_spend=utxo, target_weight=target_weight)
+                wallet.create_self_transfer_multi(utxos_to_spend=[tx["new_utxo"]], target_weight=target_weight)["tx"]
+
 
     def run_test(self):
         node = self.nodes[0]
