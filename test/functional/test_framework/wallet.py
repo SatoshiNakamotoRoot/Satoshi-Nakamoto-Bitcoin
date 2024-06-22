@@ -126,7 +126,7 @@ class MiniWallet:
         """
         tx.vout.append(CTxOut(nValue=0, scriptPubKey=CScript([OP_RETURN])))
         # determine number of needed padding bytes by converting weight difference to vbytes
-        dummy_vbytes = (target_weight - tx.get_weight() + 3) // 4
+        dummy_vbytes = (target_weight - tx.get_weight() + 3) // WITNESS_SCALE_FACTOR
         # compensate for the increase of the compact-size encoded script length
         # (note that the length encoding of the unpadded output script needs one byte)
         dummy_vbytes -= len(ser_compact_size(dummy_vbytes)) - 1
