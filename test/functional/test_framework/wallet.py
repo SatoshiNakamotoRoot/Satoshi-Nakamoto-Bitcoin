@@ -125,6 +125,9 @@ class MiniWallet:
         """Pad a transaction with extra outputs until it reaches a target weight (or higher
         at most BULK_TX_PADDING_OFFSET WU).
         """
+        padded_target_weight = target_weight + BULK_TX_PADDING_OFFSET
+        if padded_target_weight < tx.get_weight():
+            raise Exception(f"target_weight + BULK_TX_PADDING_OFFSET {padded_target_weight} is less than transaction weight {tx.get_weight()}")
         tx.vout.append(CTxOut(nValue=0, scriptPubKey=CScript([OP_RETURN])))
         # determine number of needed padding bytes by converting weight difference to vbytes
         dummy_vbytes = (target_weight - tx.get_weight() + BULK_TX_PADDING_OFFSET) // WITNESS_SCALE_FACTOR
@@ -134,7 +137,7 @@ class MiniWallet:
         tx.vout[-1].scriptPubKey = CScript([OP_RETURN] + [OP_1] * dummy_vbytes)
         # Actual weight should be at most BULK_TX_PADDING_OFFSET higher than target weight
         assert_greater_than_or_equal(tx.get_weight(), target_weight)
-        assert_greater_than_or_equal(target_weight + BULK_TX_PADDING_OFFSET, tx.get_weight())
+        assert_greater_than_or_equal(padded_target_weight, tx.get_weight())
 
     def get_balance(self):
         return sum(u['value'] for u in self._utxos)
