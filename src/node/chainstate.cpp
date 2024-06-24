@@ -88,8 +88,8 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
     }
 
-    auto is_coinsview_empty = [&](Chainstate* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        return options.wipe_chainstate_db || chainstate->CoinsTip().GetBestBlock().IsNull();
+    auto is_coinsview_empty = [&](Chainstate& chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return options.wipe_chainstate_db || chainstate.CoinsTip().GetBestBlock().IsNull();
     };
 
     assert(chainman.m_total_coinstip_cache > 0);
@@ -104,7 +104,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     // At this point we're either in reindex or we've loaded a useful
     // block tree into BlockIndex()!
 
-    for (Chainstate* chainstate : chainman.GetAll()) {
+    for (const auto& chainstate : chainman.m_chainstates) {
         LogPrintf("Initializing chainstate %s\n", chainstate->ToString());
 
         chainstate->InitCoinsDB(
@@ -133,7 +133,7 @@ static ChainstateLoadResult CompleteChainstateInitialization(
         chainstate->InitCoinsCache(chainman.m_total_coinstip_cache * init_cache_fraction);
         assert(chainstate->CanFlushToDisk());
 
-        if (!is_coinsview_empty(chainstate)) {
+        if (!is_coinsview_empty(*chainstate)) {
             // LoadChainTip initializes the chain based on CoinsTip()'s best block
             if (!chainstate->LoadChainTip()) {
                 return {ChainstateLoadStatus::FAILURE, _("Error initializing block database")};
@@ -143,9 +143,9 @@ static ChainstateLoadResult CompleteChainstateInitialization(
     }
 
     if (!options.wipe_block_tree_db) {
-        auto chainstates{chainman.GetAll()};
+        const auto& chainstates{chainman.m_chainstates};
         if (std::any_of(chainstates.begin(), chainstates.end(),
-                        [](const Chainstate* cs) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return cs->NeedsRedownload(); })) {
+                        [](const auto& cs) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return cs->NeedsRedownload(); })) {
             return {ChainstateLoadStatus::FAILURE, strprintf(_("Witness data for blocks after height %d requires validation. Please restart with -reindex."),
                                                              chainman.GetConsensus().SegwitHeight)};
         };
@@ -183,16 +183,19 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
     chainman.m_total_coinsdb_cache = cache_sizes.coins_db;
 
     // Load the fully validated chainstate.
-    chainman.InitializeChainstate(options.mempool);
+    Chainstate& validated_chainstate{chainman.InitializeChainstate(options.mempool)};
 
     // Load a chain created from a UTXO snapshot, if any exist.
-    bool has_snapshot = chainman.DetectSnapshotChainstate();
+    Chainstate* from_snapshot_chainstate{chainman.DetectSnapshotChainstate()};
 
-    if (has_snapshot && options.wipe_chainstate_db) {
+    if (from_snapshot_chainstate && options.wipe_chainstate_db) {
+        // Reset chainstate target to network tip instead of snapshot block.
+        validated_chainstate.SetTargetBlock(nullptr);
         LogPrintf("[snapshot] deleting snapshot chainstate due to reindexing\n");
-        if (!chainman.DeleteSnapshotChainstate()) {
+        if (!chainman.DeleteChainstate(*from_snapshot_chainstate)) {
             return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated("Couldn't remove snapshot chainstate.")};
         }
+        from_snapshot_chainstate = nullptr;
     }
 
     auto [init_status, init_error] = CompleteChainstateInitialization(chainman, cache_sizes, options);
@@ -208,22 +211,22 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
     // snapshot is actually validated? Because this entails unusual
     // filesystem operations to move leveldb data directories around, and that seems
     // too risky to do in the middle of normal runtime.
-    auto snapshot_completion = chainman.MaybeCompleteSnapshotValidation();
+    auto snapshot_completion{from_snapshot_chainstate
+                             ? chainman.MaybeCompleteSnapshotValidation(validated_chainstate, *from_snapshot_chainstate)
+                             : SnapshotCompletionResult::SKIPPED};
 
     if (snapshot_completion == SnapshotCompletionResult::SKIPPED) {
         // do nothing; expected case
     } else if (snapshot_completion == SnapshotCompletionResult::SUCCESS) {
         LogPrintf("[snapshot] cleaning up unneeded background chainstate, then reinitializing\n");
-        if (!chainman.ValidatedSnapshotCleanup()) {
+        if (!chainman.ValidatedSnapshotCleanup(validated_chainstate, *from_snapshot_chainstate)) {
             return {ChainstateLoadStatus::FAILURE_FATAL, Untranslated("Background chainstate cleanup failed unexpectedly.")};
         }
 
         // Because ValidatedSnapshotCleanup() has torn down chainstates with
         // ChainstateManager::ResetChainstates(), reinitialize them here without
         // duplicating the blockindex work above.
-        assert(chainman.GetAll().empty());
-        assert(!chainman.IsSnapshotActive());
-        assert(!chainman.IsSnapshotValidated());
+        assert(chainman.m_chainstates.empty());
 
         chainman.InitializeChainstate(options.mempool);
 
@@ -246,14 +249,14 @@ ChainstateLoadResult LoadChainstate(ChainstateManager& chainman, const CacheSize
 
 ChainstateLoadResult VerifyLoadedChainstate(ChainstateManager& chainman, const ChainstateLoadOptions& options)
 {
-    auto is_coinsview_empty = [&](Chainstate* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
-        return options.wipe_chainstate_db || chainstate->CoinsTip().GetBestBlock().IsNull();
+    auto is_coinsview_empty = [&](Chainstate& chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
+        return options.wipe_chainstate_db || chainstate.CoinsTip().GetBestBlock().IsNull();
     };
 
     LOCK(cs_main);
 
-    for (Chainstate* chainstate : chainman.GetAll()) {
-        if (!is_coinsview_empty(chainstate)) {
+    for (auto& chainstate : chainman.m_chainstates) {
+        if (!is_coinsview_empty(*chainstate)) {
             const CBlockIndex* tip = chainstate->m_chain.Tip();
             if (tip && tip->nTime > GetTime() + MAX_FUTURE_BLOCK_TIME) {
                 return {ChainstateLoadStatus::FAILURE, _("The block database contains a block which appears to be from the future. "
