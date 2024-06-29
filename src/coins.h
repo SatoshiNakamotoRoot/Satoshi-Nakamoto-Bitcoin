@@ -230,6 +230,40 @@ private:
     uint256 hashBlock;
 };
 
+struct CoinsViewCacheCursor
+{
+    //! will_erase should be set to true in CCoinsViewCache::Flush and false in CCoinsViewCache::Sync
+    CoinsViewCacheCursor(size_t& usage, CoinsCachePair& sentinel, CCoinsMap& map, bool will_erase) noexcept
+        : m_usage(usage), m_sentinel(sentinel), m_map(map), m_will_erase(will_erase) {}
+
+    inline CoinsCachePair* Begin() const noexcept { return m_sentinel.second.Next(); }
+    inline CoinsCachePair* End() const noexcept { return &m_sentinel; }
+
+    inline CoinsCachePair* Next(CoinsCachePair& current) noexcept
+    {
+        const auto next_entry{current.second.Next()};
+        // If we are not going to erase the cache, we must still erase spent entries.
+        // Otherwise clear the flags on the entry.
+        if (!m_will_erase) {
+            if (current.second.coin.IsSpent()) {
+                m_usage -= current.second.coin.DynamicMemoryUsage();
+                m_map.erase(current.first);
+            } else {
+                current.second.ClearFlags();
+            }
+        }
+        return next_entry;
+    }
+
+    //! Whether the current pair will be erased after being passed to Next
+    inline bool WillErase(CoinsCachePair& current) const noexcept { return m_will_erase || current.second.coin.IsSpent(); }
+private:
+    size_t& m_usage;
+    CoinsCachePair& m_sentinel;
+    CCoinsMap& m_map;
+    bool m_will_erase;
+};
+
 /** Abstract view on the open txout dataset. */
 class CCoinsView
 {
@@ -253,8 +287,8 @@ public:
     virtual std::vector<uint256> GetHeadBlocks() const;
 
     //! Do a bulk modification (multiple Coin changes + BestBlock change).
-    //! The passed mapCoins can be modified.
-    virtual bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true);
+    //! The passed cursor is used to iterate through the coins.
+    virtual bool BatchWrite(CoinsViewCacheCursor& cursor, const uint256& hashBlock);
 
     //! Get a cursor to iterate over the whole state
     virtual std::unique_ptr<CCoinsViewCursor> Cursor() const;
@@ -280,7 +314,7 @@ public:
     uint256 GetBestBlock() const override;
     std::vector<uint256> GetHeadBlocks() const override;
     void SetBackend(CCoinsView &viewIn);
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true) override;
+    bool BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashBlock) override;
     std::unique_ptr<CCoinsViewCursor> Cursor() const override;
     size_t EstimateSize() const override;
 };
@@ -320,7 +354,7 @@ public:
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
     void SetBestBlock(const uint256 &hashBlock);
-    bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock, bool erase = true) override;
+    bool BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashBlock) override;
     std::unique_ptr<CCoinsViewCursor> Cursor() const override {
         throw std::logic_error("CCoinsViewCache cursor iteration not supported.");
     }
