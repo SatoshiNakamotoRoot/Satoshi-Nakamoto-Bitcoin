@@ -38,6 +38,12 @@ CCoinsViewCache::CCoinsViewCache(CCoinsView* baseIn, bool deterministic) :
     m_sentinel.second.SelfRef(m_sentinel);
 }
 
+CCoinsViewCache::~CCoinsViewCache()
+{
+    cacheCoins.clear();
+    Assume(m_sentinel.second.Next() == &m_sentinel);
+}
+
 size_t CCoinsViewCache::DynamicMemoryUsage() const {
     return memusage::DynamicUsage(cacheCoins) + cachedCoinsUsage;
 }
