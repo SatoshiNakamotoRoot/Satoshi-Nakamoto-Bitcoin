@@ -24,6 +24,8 @@
 #include <util/fs_helpers.h>
 #include <util/thread.h>
 
+#include <sys/mman.h>
+
 
 namespace {
 
@@ -65,13 +67,9 @@ auto g_notifications{KernelNotifications()};
 //! See net_processing.
 static const int MAX_HEADERS_RESULTS{2000};
 
-// We use a mapping from file path to buffer as a boutique in-memory file system. Note it's
-// fine because we only ever use unique pathnames for block files, but it may cause issues if
-// this assumption doesn't hold anymore. ("/a/b/blk0000.dat" and "/a/b/c/../blk0000.dat" point
-// to two different buffers.)
-// The use of a global does not prevent determinism (since the buffer from one run simply gets
-// overwritten in the next) but avoids a 128MB allocation per run. FIXME: is that really true?
-std::unordered_map<fs::path, std::vector<unsigned char>, std::hash<std::filesystem::path>> g_files;
+// Mapping from file path to in-memory file (descriptor). It's fine to use a path as key as we only
+// ever use unique pathnames for block files.
+std::unordered_map<fs::path, int, std::hash<std::filesystem::path>> g_fds;
 
 //! The initial block chain used to test the chainstate.
 std::vector<std::shared_ptr<CBlock>> g_initial_blockchain;
@@ -81,47 +79,25 @@ void mock_filesystem_calls()
     fs::g_mock_create_dirs = [](const fs::path&) { return true; };
     g_mock_check_disk_space = [](const fs::path&, uint64_t) { return true; };
     fsbridge::g_mock_fopen = [&](const fs::path& file_path, const char* mode) {
-        // Get the file from the map. If it's not there insert it unless it's a file we aren't interested in.
-        const auto [data, size]{[&]{
-            const auto it = g_files.find(file_path);
-            if (it != g_files.end()) return std::make_pair(it->second.data(), it->second.size());
-            const auto file_name{PathToString(file_path.filename())};
-            // We shouldn't need to store anything else than the blk and rev files.
-            if (file_name.find("blk") == std::string::npos && file_name.find("rev") == std::string::npos) {
-                std::make_pair(nullptr, 0);
-            }
-            // NOTE: we do a single large alloc of the max possible file size, as there is no sane way to
-            // create shorter files but re-allocate when needed.
-            std::vector<unsigned char> buf(node::MAX_BLOCKFILE_SIZE);
-            const auto [it2, _]{g_files.insert({file_path, std::move(buf)})};
-            return std::make_pair(it2->second.data(), it2->second.size());
+        // Get the file from the map. If it's not there insert it first.
+        const auto fd{[&]{
+            const auto it = g_fds.find(file_path);
+            if (it != g_fds.end()) return it->second;
+            const auto [it2, _]{g_fds.insert({file_path, memfd_create(file_path.c_str(), 0)})};
+            return it2->second;
         }()};
-        if (!data) return (FILE*)nullptr;
-        return fmemopen(data, size, mode);
+        //std::cout << "Opening " << file_path << " fd " << fd << " mode " << mode << std::endl;
+        return Assert(fdopen(dup(fd), mode));
     };
     fs::g_mock_remove = [&](const fs::path& file_path) {
-        g_files.erase(file_path);
+        g_fds.erase(file_path);
         return true;
     };
     fs::g_mock_exists = [&](const fs::path& file_path) {
-        return g_files.count(file_path) > 0;
+        return g_fds.count(file_path) > 0;
     };
     fs::g_mock_rename = [&](const std::filesystem::path& old_p, const std::filesystem::path& new_p) {
-        g_files.extract(old_p).key() = new_p;
-    };
-    // Needs to be mocked because it may call `fileno(3)`, which returns an error for `fmemopen(3)`ed streams.
-    g_mock_file_commit = [&](FILE* f) {
-        return fflush(f) == 0;
-    };
-    // Needs to be mocked because it may call `fileno(3)`, which returns an error for `fmemopen(3)`ed streams.
-    g_mock_dir_commit = [&](std::filesystem::path) {};
-    // Needs to be mocked because it may call `fileno(3)`, which returns an error for `fmemopen(3)`ed streams.
-    g_mock_truncate_file = [&](FILE*, unsigned int) {
-        return true;
-    };
-    // Needs to be mocked because it may call `fileno(3)`, which returns an error for `fmemopen(3)`ed streams.
-    g_mock_allocate_file_range = [&](FILE*, unsigned int, unsigned int) {
-        return true;
+        g_fds.extract(old_p).key() = new_p;
     };
 }
 
@@ -651,6 +627,11 @@ FUZZ_TARGET(chainstate, .init = init_chainstate)
             }
         );
     };
+
+    for (const auto& [_, fd]: g_fds) {
+        close(fd);
+    }
+    g_fds.clear();
 
     for (const auto& [_, fd]: g_fds) {
         close(fd);
