@@ -57,6 +57,7 @@
 #include <policy/feerate.h>
 #include <policy/fees.h>
 #include <policy/fees_args.h>
+#include <policy/forecasters/mempool.h>
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <protocol.h>
@@ -1605,6 +1606,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
 
+    ChainstateManager& chainman = *Assert(node.chainman);
     assert(!node.fee_estimator);
     // Don't initialize legacy fee estimator if we don't relay transactions,
     // as new data will not be appended and old data will never be updated.
@@ -1615,6 +1617,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
 
         node.fee_estimator = std::make_unique<FeeEstimator>(FeeestPath(args), read_stale_estimates, node.mempool.get());
+        node.fee_estimator->RegisterForecaster(std::make_unique<MemPoolForecaster>(node.mempool.get(), &(chainman.ActiveChainstate())));
 
         // Flush legacy estimates to disk periodically
         CBlockPolicyEstimator* block_policy_estimator = node.fee_estimator->block_policy_estimator->get();
@@ -1629,8 +1632,6 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         LogPrintf("Shutdown requested. Exiting.\n");
         return false;
     }
-
-    ChainstateManager& chainman = *Assert(node.chainman);
 
     assert(!node.peerman);
     node.peerman = PeerManager::make(*node.connman, *node.addrman,
