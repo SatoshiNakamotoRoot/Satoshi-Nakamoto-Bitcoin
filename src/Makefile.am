@@ -249,6 +249,7 @@ BITCOIN_CORE_H = \
   policy/fees.h \
   policy/fees_args.h \
   policy/packages.h \
+  policy/forecasters/mempool.h \
   policy/policy.h \
   policy/rbf.h \
   policy/settings.h \
@@ -451,6 +452,8 @@ libbitcoin_node_a_SOURCES = \
   policy/fee_estimator.cpp \
   policy/fees.cpp \
   policy/fees_args.cpp \
+  policy/forecaster_util.cpp \
+  policy/forecasters/mempool.cpp \
   policy/packages.cpp \
   policy/rbf.cpp \
   policy/settings.cpp \
