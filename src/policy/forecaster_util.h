@@ -10,7 +10,9 @@
 #include <optional>
 #include <string>
 
-enum class ForecastType {};
+enum class ForecastType {
+    BLOCK_POLICY_ESTIMATOR,
+};
 
 struct ForecastResult {
     struct ForecastOptions {
