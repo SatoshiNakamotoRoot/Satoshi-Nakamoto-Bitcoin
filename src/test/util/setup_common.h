@@ -73,7 +73,10 @@ struct ChainTestingSetup : public BasicTestingSetup {
     bool m_coins_db_in_memory{true};
     bool m_block_tree_db_in_memory{true};
 
-    explicit ChainTestingSetup(const ChainType chainType = ChainType::MAIN, const std::vector<const char*>& extra_args = {});
+    explicit ChainTestingSetup(
+        const ChainType chainType = ChainType::MAIN,
+        const std::vector<const char*>& extra_args = {},
+        bool setup_validation_interface = true);
     ~ChainTestingSetup();
 
     // Supplies a chainstate, if one is needed
@@ -87,7 +90,9 @@ struct TestingSetup : public ChainTestingSetup {
         const ChainType chainType = ChainType::MAIN,
         const std::vector<const char*>& extra_args = {},
         const bool coins_db_in_memory = true,
-        const bool block_tree_db_in_memory = true);
+        const bool block_tree_db_in_memory = true,
+        const bool setup_net = true,
+        const bool setup_validation_interface = true);
 };
 
 /** Identical to TestingSetup, but chain set to regtest */
@@ -215,6 +220,16 @@ struct TestChain100Setup : public TestingSetup {
     CKey coinbaseKey; // private/public key needed to spend coinbase transactions
 };
 
+inline std::vector<const char*> AddNoLogArgs(const std::vector<const char*> args)
+{
+    return Cat(
+        {
+            "-nodebuglogfile",
+            "-nodebug",
+        },
+        args);
+}
+
 /**
  * Make a test setup that has disk access to the debug.log file disabled. Can
  * be used in "hot loops", for example fuzzing or benchmarking.
@@ -222,14 +237,7 @@ struct TestChain100Setup : public TestingSetup {
 template <class T = const BasicTestingSetup>
 std::unique_ptr<T> MakeNoLogFileContext(const ChainType chain_type = ChainType::REGTEST, const std::vector<const char*>& extra_args = {})
 {
-    const std::vector<const char*> arguments = Cat(
-        {
-            "-nodebuglogfile",
-            "-nodebug",
-        },
-        extra_args);
-
-    return std::make_unique<T>(chain_type, arguments);
+    return std::make_unique<T>(chain_type, AddNoLogArgs(extra_args));
 }
 
 CBlock getBlock13b8a();

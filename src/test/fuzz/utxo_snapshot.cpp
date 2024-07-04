@@ -31,7 +31,13 @@ void initialize_chain()
 FUZZ_TARGET(utxo_snapshot, .init = initialize_chain)
 {
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
-    std::unique_ptr<const TestingSetup> setup{MakeNoLogFileContext<const TestingSetup>()};
+    auto setup{std::make_unique<const TestingSetup>(
+        /*chain_type*/ ChainType::REGTEST,
+        /*extra_args*/ AddNoLogArgs({}),
+        /*coins_db_in_memory*/ true,
+        /*block_tree_db_in_memory*/ true,
+        /*setup_net*/ false,
+        /*setup_validation_interface*/ false)};
     const auto& node = setup->m_node;
     auto& chainman{*node.chainman};
 
