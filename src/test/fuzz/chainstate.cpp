@@ -47,6 +47,19 @@ public:
     }
 };
 
+class DummyQueue : public util::TaskRunnerInterface
+{
+public:
+    DummyQueue() {}
+
+    void insert(std::function<void()> func) override {}
+
+    void flush() override {}
+
+    size_t size() override { return 0; }
+};
+ValidationSignals dummy_main_signals{std::make_unique<DummyQueue>()};
+
 auto g_notifications{KernelNotifications()};
 
 //! See net_processing.
@@ -461,10 +474,6 @@ FUZZ_TARGET(chainstate, .init = init_chainstate)
     const fs::path datadir{""};
     std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher> utxos;
 
-    CScheduler scheduler;
-    GetMainSignals().RegisterBackgroundSignalScheduler(scheduler);
-    scheduler.m_service_thread = std::thread(util::TraceThread, "scheduler", [&] { scheduler.serviceQueue(); });
-
     // Create the chainstate..
     uint64_t prune_target{0};
     if (fuzzed_data_provider.ConsumeBool()) {
@@ -485,6 +494,7 @@ FUZZ_TARGET(chainstate, .init = init_chainstate)
         .minimum_chain_work = UintToArith256(uint256{}),
         .assumed_valid_block = uint256{},
         .notifications = g_notifications,
+        .signals = &dummy_main_signals,
     };
     ChainstateManager chainman{*g_setup->m_node.shutdown, chainman_opts, blockman_opts};
 
@@ -642,8 +652,10 @@ FUZZ_TARGET(chainstate, .init = init_chainstate)
         );
     };
 
-    scheduler.stop(); // FIXME: slow.
-    GetMainSignals().UnregisterBackgroundSignalScheduler();
+    for (const auto& [_, fd]: g_fds) {
+        close(fd);
+    }
+    g_fds.clear();
 
     // FIXME: ImportBlocks is insanely slow because we've got 128MiB blk files. Can we find an alternative to be able to
     // exercise the reindex logic?
