@@ -13,16 +13,12 @@ The assumeutxo value generated and used here is committed to in
 
 Interesting test cases could be loading an assumeutxo snapshot file with:
 
-- TODO: Valid snapshot file, but referencing a snapshot block that turns out to be
-      invalid, or has an invalid parent
 - TODO: Valid snapshot file and snapshot block, but the block is not on the
       most-work chain
 
 Interesting starting states could be loading a snapshot when the current chain tip is:
 
-- TODO: An ancestor of snapshot block
 - TODO: The snapshot block
-- TODO: A descendant of the snapshot block
 - TODO: Not an ancestor or a descendant of the snapshot block and has more work
 
 """
@@ -332,6 +328,8 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.test_snapshot_block_invalidated(dump_output['path'])
 
         self.log.info(f"Loading snapshot into second node from {dump_output['path']}")
+        # This node's tip is on an ancestor block of the snapshot, which should
+        # be the normal case
         loaded = n1.loadtxoutset(dump_output['path'])
         assert_equal(loaded['coins_loaded'], SNAPSHOT_BASE_HEIGHT)
         assert_equal(loaded['base_height'], SNAPSHOT_BASE_HEIGHT)
