@@ -949,7 +949,18 @@ private:
      * same probability that we have in the reject filter).
      */
     Mutex m_recent_confirmed_transactions_mutex;
-    CRollingBloomFilter m_recent_confirmed_transactions GUARDED_BY(m_recent_confirmed_transactions_mutex){48'000, 0.000'001};
+    std::unique_ptr<CRollingBloomFilter> m_recent_confirmed_transactions GUARDED_BY(m_recent_confirmed_transactions_mutex){nullptr};
+
+    CRollingBloomFilter& RecentConfirmedTransactionsFilter() EXCLUSIVE_LOCKS_REQUIRED(m_recent_confirmed_transactions_mutex)
+    {
+        AssertLockHeld(m_recent_confirmed_transactions_mutex);
+
+        if (!m_recent_confirmed_transactions) {
+            m_recent_confirmed_transactions = std::make_unique<CRollingBloomFilter>(48'000, 0.000'001);
+        }
+
+        return *m_recent_confirmed_transactions;
+    }
 
     /**
      * For sending `inv`s to inbound peers, we use a single (exponentially
@@ -2111,9 +2122,9 @@ void PeerManagerImpl::BlockConnected(
     {
         LOCK(m_recent_confirmed_transactions_mutex);
         for (const auto& ptx : pblock->vtx) {
-            m_recent_confirmed_transactions.insert(ptx->GetHash().ToUint256());
+            RecentConfirmedTransactionsFilter().insert(ptx->GetHash().ToUint256());
             if (ptx->HasWitness()) {
-                m_recent_confirmed_transactions.insert(ptx->GetWitnessHash().ToUint256());
+                RecentConfirmedTransactionsFilter().insert(ptx->GetWitnessHash().ToUint256());
             }
         }
     }
@@ -2137,7 +2148,7 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
     // presumably the most common case of relaying a confirmed transaction
     // should be just after a new block containing it is found.
     LOCK(m_recent_confirmed_transactions_mutex);
-    m_recent_confirmed_transactions.reset();
+    RecentConfirmedTransactionsFilter().reset();
 }
 
 /**
@@ -2310,7 +2321,7 @@ bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconside
 
     {
         LOCK(m_recent_confirmed_transactions_mutex);
-        if (m_recent_confirmed_transactions.contains(hash)) return true;
+        if (RecentConfirmedTransactionsFilter().contains(hash)) return true;
     }
 
     return RecentRejectsFilter().contains(hash) || m_mempool.exists(gtxid);
