@@ -4,12 +4,14 @@
 
 #include <chain.h>
 #include <chainparams.h>
+#include <config/bitcoin-config.h>
 #include <consensus/merkle.h>
 #include <kernel/notifications_interface.h>
 #include <node/blockstorage.h>
 #include <node/chainstate.h>
 #include <node/miner.h>
 #include <pow.h>
+#include <random.h>
 #include <scheduler.h>
 #include <undo.h>
 #include <validation.h>
@@ -60,19 +62,36 @@ public:
 
     size_t size() override { return 0; }
 };
-ValidationSignals dummy_main_signals{std::make_unique<DummyQueue>()};
-
-auto g_notifications{KernelNotifications()};
 
 //! See net_processing.
 static const int MAX_HEADERS_RESULTS{2000};
 
+//! To generate a random tmp datadir per process (necessary to fuzz with multiple cores).
+static FastRandomContext g_insecure_rand_ctx_temp_path;
+
+struct TestData {
+    fs::path init_datadir;
+    fs::path working_datadir;
+    ValidationSignals main_signals{std::make_unique<DummyQueue>()};
+    KernelNotifications notifs;
+
+    void Init() {
+        const auto rand_str{g_insecure_rand_ctx_temp_path.rand256().ToString()};
+        const auto tmp_dir{fs::temp_directory_path() / "fuzz_chainstate_" PACKAGE_NAME / rand_str};
+        init_datadir = tmp_dir / "init";
+        fs::remove_all(init_datadir);
+        fs::create_directories(init_datadir / "blocks");
+        working_datadir = tmp_dir / "working";
+    }
+
+    ~TestData() {
+        fs::remove_all(init_datadir);
+    }
+} g_test_data;
+
 // Mapping from file path to in-memory file (descriptor). It's fine to use a path as key as we only
 // ever use unique pathnames for block files.
 std::unordered_map<fs::path, int, std::hash<std::filesystem::path>> g_fds;
-
-//! The initial block chain used to test the chainstate.
-std::vector<std::shared_ptr<CBlock>> g_initial_blockchain;
 
 void mock_filesystem_calls()
 {
@@ -301,7 +320,7 @@ FUZZ_TARGET(blockstorage, .init = init_blockstorage)
         .chainparams = chainparams,
         .prune_target = prune_target,
         .blocks_dir = "blocks",
-        .notifications = g_notifications,
+        .notifications = g_test_data.notifs,
     };
     auto blockman{node::BlockManager{*g_setup->m_node.shutdown, std::move(blockman_opts)}};
     {
@@ -427,10 +446,9 @@ FUZZ_TARGET(blockstorage, .init = init_blockstorage)
 
 void init_chainstate()
 {
-    static const auto testing_setup = MakeNoLogFileContext<>(ChainType::MAIN);
+    // FIXME: only used to setup logging. Set it up without instantiating a whole, unused, BasicTestingSetup.
+    static const auto testing_setup = MakeNoLogFileContext<>(ChainType::MAIN/*, {"-printtoconsole", "-debug"}*/);
     g_setup = testing_setup.get();
-
-    mock_filesystem_calls();
 
     // Make the pow check always pass to be able to mine a chain from inside the target.
     // TODO: we could have two mocks, once which passes, the other which fails. This way we can
@@ -439,16 +457,66 @@ void init_chainstate()
         return true;
     };
 
-    // Get 10 spendable UTxOs.
-    g_initial_blockchain = CreateBlockChain(110, Params());
+    // This creates the datadirs in the tmp dir.
+    g_test_data.Init();
+
+    // Create the chainstate for the initial datadir. On every round we'll restart from this chainstate instead of
+    // re-creating one from scratch.
+    node::BlockManager::Options blockman_opts{
+        .chainparams = Params(),
+        .blocks_dir = g_test_data.init_datadir / "blocks",
+        .notifications = g_test_data.notifs,
+    };
+    const ChainstateManager::Options chainman_opts{
+        .chainparams = Params(),
+        .datadir = g_test_data.init_datadir,
+        .check_block_index = false,
+        .checkpoints_enabled = false,
+        .minimum_chain_work = UintToArith256(uint256{}),
+        .assumed_valid_block = uint256{},
+        .notifications = g_test_data.notifs,
+        .signals = &g_test_data.main_signals,
+    };
+    ChainstateManager chainman{*g_setup->m_node.shutdown, chainman_opts, blockman_opts};
+    node::CacheSizes cache_sizes;
+    cache_sizes.block_tree_db = 1;
+    cache_sizes.coins_db = 2;
+    cache_sizes.coins = 3;
+    node::ChainstateLoadOptions load_opts {
+        .require_full_verification = false,
+        .coins_error_cb = nullptr,
+    };
+    auto [status, _] = node::LoadChainstate(chainman, cache_sizes, load_opts);
+    assert(status == node::ChainstateLoadStatus::SUCCESS);
+
+    // Connect the initial chain to get 10 spendable UTxOs at the start of every fuzzing round.
+    const auto g_initial_blockchain{CreateBlockChain(110, Params())};
+    BlockValidationState valstate;
+    auto& chainstate{chainman.ActiveChainstate()};
+    assert(chainstate.ActivateBestChain(valstate, nullptr));
+    for (const auto& block : g_initial_blockchain) {
+        bool new_block{false};
+        assert(chainman.ProcessNewBlock(block, true, true, &new_block));
+        assert(new_block);
+    }
+
+    LOCK(cs_main);
+    if (chainstate.CanFlushToDisk()) {
+        chainstate.ForceFlushStateToDisk();
+    }
 }
 
 FUZZ_TARGET(chainstate, .init = init_chainstate)
 {
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     const auto& chainparams{Params()};
-    const fs::path datadir{""};
     std::unordered_map<COutPoint, CTxOut, SaltedOutpointHasher> utxos;
+
+    //const auto first_time{SteadyClock::now()};
+
+    // On every round start from a freshly copied initial datadir.
+    fs::remove_all(g_test_data.working_datadir);
+    fs::copy(g_test_data.init_datadir, g_test_data.working_datadir, fs::copy_options::overwrite_existing | fs::copy_options::recursive);
 
     // Create the chainstate..
     uint64_t prune_target{0};
@@ -458,19 +526,19 @@ FUZZ_TARGET(chainstate, .init = init_chainstate)
     node::BlockManager::Options blockman_opts{
         .chainparams = chainparams,
         .prune_target = prune_target,
-        .blocks_dir = datadir / "blocks",
-        .notifications = g_notifications,
+        .blocks_dir = g_test_data.working_datadir / "blocks",
+        .notifications = g_test_data.notifs,
     };
     const ChainstateManager::Options chainman_opts{
         .chainparams = chainparams,
-        .datadir = "",
-        // TODO: make it possible to call CheckBlockIndex() without having set it here, call it in CallOneOf().
+        .datadir = g_test_data.working_datadir,
+        // TODO: make it possible to call CheckBlockIndex() without having set it here, and call it in CallOneOf().
         .check_block_index = true,
         .checkpoints_enabled = false,
         .minimum_chain_work = UintToArith256(uint256{}),
         .assumed_valid_block = uint256{},
-        .notifications = g_notifications,
-        .signals = &dummy_main_signals,
+        .notifications = g_test_data.notifs,
+        .signals = &g_test_data.main_signals,
     };
     ChainstateManager chainman{*g_setup->m_node.shutdown, chainman_opts, blockman_opts};
 
@@ -480,25 +548,16 @@ FUZZ_TARGET(chainstate, .init = init_chainstate)
     cache_sizes.coins_db = 2 << 22;
     cache_sizes.coins = (450 << 20) - (2 << 20) - (2 << 22);
     node::ChainstateLoadOptions load_opts {
-        .block_tree_db_in_memory = true,
-        .coins_db_in_memory = true,
         .prune = prune_target > 0,
         .require_full_verification = false,
+        .coins_error_cb = nullptr,
     };
     auto [status, _] = node::LoadChainstate(chainman, cache_sizes, load_opts);
     assert(status == node::ChainstateLoadStatus::SUCCESS);
 
-    // Activate the initial chain.
-    BlockValidationState dummy_valstate;
-    for (Chainstate* chainstate : chainman.GetAll()) {
-        assert(chainstate->ActivateBestChain(dummy_valstate, nullptr));
-    }
-    for (const auto& block : g_initial_blockchain) {
-        bool new_block{false};
-        assert(chainman.ProcessNewBlock(block, true, true, &new_block));
-        assert(new_block);
-    }
+    //const auto time_before_loop{SteadyClock::now()};
 
+    BlockValidationState dummy_valstate;
     std::vector<CBlock> blocks_in_flight;
     LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 10'000) {
         // Every so often, update our cache used to create non-coinbase txs.
@@ -628,18 +687,13 @@ FUZZ_TARGET(chainstate, .init = init_chainstate)
         );
     };
 
-    for (const auto& [_, fd]: g_fds) {
-        close(fd);
-    }
-    g_fds.clear();
+    //const auto time_end{SteadyClock::now()};
+    //const auto creation_duration{duration_cast<std::chrono::milliseconds>(time_before_loop - first_time)};
+    //std::cout << "Creation duration: " << creation_duration << std::endl;
+    //const auto loop_duration{duration_cast<std::chrono::milliseconds>(time_end - time_before_loop)};
+    //std::cout << "Loop duration: " << loop_duration << std::endl;
 
-    for (const auto& [_, fd]: g_fds) {
-        close(fd);
-    }
-    g_fds.clear();
-
-    // FIXME: ImportBlocks is insanely slow because we've got 128MiB blk files. Can we find an alternative to be able to
-    // exercise the reindex logic?
+    // TODO: exercise the reindex logic.
     // TODO: sometimes run with an assumed chainstate too. One way could be to generate a snapshot during init and
     // sometimes ActivateSnapshot() at the beginning of the harness.
 }
