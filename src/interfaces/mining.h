@@ -7,6 +7,7 @@
 
 #include <node/types.h>
 #include <uint256.h>
+#include <util/time.h>
 
 #include <memory>
 #include <optional>
@@ -62,6 +63,15 @@ public:
 
     //! Returns the hash for the tip of this chain
     virtual std::optional<uint256> getTipHash() = 0;
+
+    /**
+     * Waits for the tip to change
+     *
+     * @param[in] timeout how long to wait for a new tip
+     * @returns hash and height for the new tip or the previous tip if
+     *          interrupted or after the timeout
+     */
+    virtual std::pair<uint256, int> waitTipChanged(MillisecondsDouble timeout = MillisecondsDouble::max()) = 0;
 
    /**
      * Construct a new block template
