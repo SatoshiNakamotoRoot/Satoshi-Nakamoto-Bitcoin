@@ -21,6 +21,7 @@
 #include <hash.h>
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
+#include <interfaces/mining.h>
 #include <kernel/coinstats.h>
 #include <logging/timer.h>
 #include <net.h>
@@ -59,6 +60,7 @@
 using kernel::CCoinsStats;
 using kernel::CoinStatsHashType;
 
+using interfaces::Mining;
 using node::BlockManager;
 using node::NodeContext;
 using node::SnapshotMetadata;
@@ -69,10 +71,6 @@ struct CUpdatedBlock
     uint256 hash;
     int height;
 };
-
-static GlobalMutex cs_blockchange;
-static std::condition_variable cond_blockchange;
-static CUpdatedBlock latestblock GUARDED_BY(cs_blockchange);
 
 /* Calculate the difficulty for a given block index.
  */
@@ -242,16 +240,6 @@ static RPCHelpMan getbestblockhash()
     };
 }
 
-void RPCNotifyBlockChange(const CBlockIndex* pindex)
-{
-    if(pindex) {
-        LOCK(cs_blockchange);
-        latestblock.hash = pindex->GetBlockHash();
-        latestblock.height = pindex->nHeight;
-    }
-    cond_blockchange.notify_all();
-}
-
 static RPCHelpMan waitfornewblock()
 {
     return RPCHelpMan{"waitfornewblock",
@@ -277,16 +265,18 @@ static RPCHelpMan waitfornewblock()
         timeout = request.params[0].getInt<int>();
     if (timeout < 0) throw JSONRPCError(RPC_MISC_ERROR, "Negative timeout");
 
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    Mining& miner = EnsureMining(node);
+
     CUpdatedBlock block;
-    {
-        WAIT_LOCK(cs_blockchange, lock);
-        block = latestblock;
-        if(timeout)
-            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&block]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height != block.height || latestblock.hash != block.hash || !IsRPCRunning(); });
-        else
-            cond_blockchange.wait(lock, [&block]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height != block.height || latestblock.hash != block.hash || !IsRPCRunning(); });
-        block = latestblock;
+    const auto deadline{std::chrono::steady_clock::now() + 1ms * timeout};
+
+    while(IsRPCRunning() && (timeout == 0 || std::chrono::steady_clock::now() < deadline)) {
+        auto res = timeout ? miner.waitTipChanged(std::chrono::milliseconds(timeout)) : miner.waitTipChanged();
+        block.hash = res.first;
+        block.height = res.second;
     }
+
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("hash", block.hash.GetHex());
     ret.pushKV("height", block.height);
@@ -324,14 +314,19 @@ static RPCHelpMan waitforblock()
         timeout = request.params[1].getInt<int>();
     if (timeout < 0) throw JSONRPCError(RPC_MISC_ERROR, "Negative timeout");
 
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    Mining& miner = EnsureMining(node);
+
     CUpdatedBlock block;
-    {
-        WAIT_LOCK(cs_blockchange, lock);
-        if(timeout)
-            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&hash]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.hash == hash || !IsRPCRunning();});
-        else
-            cond_blockchange.wait(lock, [&hash]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.hash == hash || !IsRPCRunning(); });
-        block = latestblock;
+    block.hash = CHECK_NONFATAL(miner.getTipHash()).value();
+    block.height = CHECK_NONFATAL(miner.getTipHeight()).value();
+
+    const auto deadline{std::chrono::steady_clock::now() + 1ms * timeout};
+    while(IsRPCRunning() && (timeout == 0 || std::chrono::steady_clock::now() < deadline)) {
+        if (block.hash == hash) break;
+        auto res = timeout ? miner.waitTipChanged(std::chrono::milliseconds(timeout)) : miner.waitTipChanged();
+        block.hash = res.first;
+        block.height = res.second;
     }
 
     UniValue ret(UniValue::VOBJ);
@@ -372,15 +367,21 @@ static RPCHelpMan waitforblockheight()
         timeout = request.params[1].getInt<int>();
     if (timeout < 0) throw JSONRPCError(RPC_MISC_ERROR, "Negative timeout");
 
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    Mining& miner = EnsureMining(node);
+
     CUpdatedBlock block;
-    {
-        WAIT_LOCK(cs_blockchange, lock);
-        if(timeout)
-            cond_blockchange.wait_for(lock, std::chrono::milliseconds(timeout), [&height]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height >= height || !IsRPCRunning();});
-        else
-            cond_blockchange.wait(lock, [&height]() EXCLUSIVE_LOCKS_REQUIRED(cs_blockchange) {return latestblock.height >= height || !IsRPCRunning(); });
-        block = latestblock;
+    block.hash = CHECK_NONFATAL(miner.getTipHash()).value();
+    block.height = CHECK_NONFATAL(miner.getTipHeight()).value();
+
+    const auto deadline{std::chrono::steady_clock::now() + 1ms * timeout};
+    while(IsRPCRunning() && (timeout == 0 || std::chrono::steady_clock::now() < deadline)) {
+        if (block.height >= height) break;
+        auto res = timeout ? miner.waitTipChanged(std::chrono::milliseconds(timeout)) : miner.waitTipChanged();
+        block.hash = res.first;
+        block.height = res.second;
     }
+
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("hash", block.hash.GetHex());
     ret.pushKV("height", block.height);
