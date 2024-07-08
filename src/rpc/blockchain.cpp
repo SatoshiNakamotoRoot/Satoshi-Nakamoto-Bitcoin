@@ -583,8 +583,11 @@ static CBlock GetBlockChecked(BlockManager& blockman, const CBlockIndex& blockin
     CBlock block;
     {
         LOCK(cs_main);
-        if (blockman.IsBlockPruned(blockindex)) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+        if (!(blockindex.nStatus & BLOCK_HAVE_DATA)) {
+            if (blockman.IsBlockPruned(blockindex)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+            }
+            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (not fully downloaded)");
         }
     }
 
@@ -604,8 +607,11 @@ static std::vector<uint8_t> GetRawBlockChecked(BlockManager& blockman, const CBl
     FlatFilePos pos{};
     {
         LOCK(cs_main);
-        if (blockman.IsBlockPruned(blockindex)) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+        if (!(blockindex.nStatus & BLOCK_HAVE_DATA)) {
+            if (blockman.IsBlockPruned(blockindex)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+            }
+            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (not fully downloaded)");
         }
         pos = blockindex.GetBlockPos();
     }
@@ -629,8 +635,11 @@ static CBlockUndo GetUndoChecked(BlockManager& blockman, const CBlockIndex& bloc
 
     {
         LOCK(cs_main);
-        if (blockman.IsBlockPruned(blockindex)) {
-            throw JSONRPCError(RPC_MISC_ERROR, "Undo data not available (pruned data)");
+        if (!(blockindex.nStatus & BLOCK_HAVE_DATA)) {
+            if (blockman.IsBlockPruned(blockindex)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Block not available (pruned data)");
+            }
+            throw JSONRPCError(RPC_MISC_ERROR, "Block not available (not fully downloaded)");
         }
     }
 
