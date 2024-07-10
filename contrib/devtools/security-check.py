@@ -145,7 +145,7 @@ def check_PE_control_flow(binary) -> bool:
         return True
     return False
 
-def check_PE_Canary(binary) -> bool:
+def check_PE_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
@@ -217,7 +217,7 @@ BASE_PE = [
     ('NX', check_NX),
     ('RELOC_SECTION', check_PE_RELOC_SECTION),
     ('CONTROL_FLOW', check_PE_control_flow),
-    ('Canary', check_PE_Canary),
+    ('CANARY', check_PE_CANARY),
 ]
 
 BASE_MACHO = [
