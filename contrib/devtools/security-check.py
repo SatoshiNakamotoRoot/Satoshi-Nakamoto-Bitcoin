@@ -38,13 +38,13 @@ def check_ELF_RELRO(binary) -> bool:
 
     return have_gnu_relro and have_bindnow
 
-def check_ELF_Canary(binary) -> bool:
+def check_ELF_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
     return binary.has_symbol('__stack_chk_fail')
 
-def check_ELF_separate_code(binary):
+def check_ELF_SEPARATE_CODE(binary):
     '''
     Check that sections are appropriately separated in virtual memory,
     based on their permissions. This checks for missing -Wl,-z,separate-code
@@ -206,8 +206,8 @@ BASE_ELF = [
     ('PIE', check_PIE),
     ('NX', check_NX),
     ('RELRO', check_ELF_RELRO),
-    ('Canary', check_ELF_Canary),
-    ('separate_code', check_ELF_separate_code),
+    ('CANARY', check_ELF_CANARY),
+    ('SEPARATE_CODE', check_ELF_SEPARATE_CODE),
 ]
 
 BASE_PE = [
