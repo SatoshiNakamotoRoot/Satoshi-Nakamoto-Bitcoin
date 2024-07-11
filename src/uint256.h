@@ -8,6 +8,7 @@
 
 #include <crypto/common.h>
 #include <span.h>
+#include <util/strencodings.h>
 
 #include <algorithm>
 #include <array>
@@ -111,6 +112,47 @@ public:
     static const uint256 ONE;
 };
 
+/* uint256 from const char *.
+ * Could theoretically have been a constructor but is overload of uint256S() for
+ * historical reasons.
+ */
+consteval uint256 uint256S(const char *str)
+{
+   // Non lookup table version of HexDigit().
+    auto from_hex = [](const char c) -> int8_t {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        else if (c >= 'a' && c <= 'f')
+            return c - 'a' + 0xA;
+        else if (c >= 'A' && c <= 'F')
+            return c - 'A' + 0xA;
+        else
+            return -1;
+    };
+
+    // Skip leading spaces.
+    while (IsSpace(*str))
+        str += 1;
+    // Skip "0x" prefix.
+    if (str[0] == '0' && str[1] == 'x')
+        str += 2;
+
+    size_t digits = 0;
+    while (from_hex(str[digits]) != -1)
+        ++digits;
+    // 64 = 32 bytes * 2 chars each. 32 bytes = 256 bits.
+    assert(digits <= 64);
+    uint256 rv;
+    uint8_t* it = rv.begin();
+    while (digits > 0) {
+        *it = from_hex(str[--digits]);
+        if (digits > 0) {
+            *it |= from_hex(str[--digits]) << 4;
+            ++it;
+        }
+    }
+    return rv;
+}
 /* uint256 from std::string_view.
  * This is not a uint256 constructor because of historical fears of uint256(0)
  * resolving to a NULL string and crashing.
