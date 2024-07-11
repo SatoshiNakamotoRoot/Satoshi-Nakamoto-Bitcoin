@@ -17,9 +17,8 @@ BOOST_FIXTURE_TEST_SUITE(wallet_crypto_tests, BasicTestingSetup)
 class TestCrypter
 {
 public:
-static void TestPassphraseSingle(const std::vector<unsigned char>& vchSalt, const SecureString& passphrase, uint32_t rounds,
-                 const std::vector<unsigned char>& correctKey = std::vector<unsigned char>(),
-                 const std::vector<unsigned char>& correctIV=std::vector<unsigned char>())
+static void TestPassphraseSingle(std::span<const unsigned char> vchSalt, const SecureString& passphrase, uint32_t rounds,
+                 std::span<const unsigned char> correctKey = {}, std::span<const unsigned char> correctIV = {})
 {
     CCrypter crypt;
     crypt.SetKeyFromPassphrase(passphrase, vchSalt, rounds, 0);
@@ -32,16 +31,15 @@ static void TestPassphraseSingle(const std::vector<unsigned char>& vchSalt, cons
             HexStr(crypt.vchIV) + std::string(" != ") + HexStr(correctIV));
 }
 
-static void TestPassphrase(const std::vector<unsigned char>& vchSalt, const SecureString& passphrase, uint32_t rounds,
-                 const std::vector<unsigned char>& correctKey = std::vector<unsigned char>(),
-                 const std::vector<unsigned char>& correctIV=std::vector<unsigned char>())
+static void TestPassphrase(std::span<const unsigned char> vchSalt, const SecureString& passphrase, uint32_t rounds,
+                 std::span<const unsigned char> correctKey = {}, std::span<const unsigned char> correctIV = {})
 {
     TestPassphraseSingle(vchSalt, passphrase, rounds, correctKey, correctIV);
     for(SecureString::const_iterator i(passphrase.begin()); i != passphrase.end(); ++i)
         TestPassphraseSingle(vchSalt, SecureString(i, passphrase.end()), rounds);
 }
 
-static void TestDecrypt(const CCrypter& crypt, const std::vector<unsigned char>& vchCiphertext, \
+static void TestDecrypt(const CCrypter& crypt, std::span<const unsigned char> vchCiphertext, \
                         const std::vector<unsigned char>& vchPlaintext = std::vector<unsigned char>())
 {
     CKeyingMaterial vchDecrypted;
@@ -63,11 +61,11 @@ static void TestEncryptSingle(const CCrypter& crypt, const CKeyingMaterial& vchP
     TestDecrypt(crypt, vchCiphertext, vchPlaintext2);
 }
 
-static void TestEncrypt(const CCrypter& crypt, const std::vector<unsigned char>& vchPlaintextIn, \
+static void TestEncrypt(const CCrypter& crypt, std::span<const unsigned char> vchPlaintextIn, \
                        const std::vector<unsigned char>& vchCiphertextCorrect = std::vector<unsigned char>())
 {
     TestEncryptSingle(crypt, CKeyingMaterial(vchPlaintextIn.begin(), vchPlaintextIn.end()), vchCiphertextCorrect);
-    for(std::vector<unsigned char>::const_iterator i(vchPlaintextIn.begin()); i != vchPlaintextIn.end(); ++i)
+    for (auto i{vchPlaintextIn.begin()}; i != vchPlaintextIn.end(); ++i)
         TestEncryptSingle(crypt, CKeyingMaterial(i, vchPlaintextIn.end()));
 }
 
@@ -90,7 +88,7 @@ BOOST_AUTO_TEST_CASE(passphrase) {
 }
 
 BOOST_AUTO_TEST_CASE(encrypt) {
-    std::vector<unsigned char> vchSalt = ParseHex("0000deadbeef0000");
+    constexpr FixedVec<unsigned char, 8> vchSalt = ParseHex("0000deadbeef0000");
     BOOST_CHECK(vchSalt.size() == WALLET_CRYPTO_SALT_SIZE);
     CCrypter crypt;
     crypt.SetKeyFromPassphrase("passphrase", vchSalt, 25000, 0);
@@ -105,7 +103,7 @@ BOOST_AUTO_TEST_CASE(encrypt) {
 }
 
 BOOST_AUTO_TEST_CASE(decrypt) {
-    std::vector<unsigned char> vchSalt = ParseHex("0000deadbeef0000");
+    constexpr FixedVec<unsigned char, 8> vchSalt = ParseHex("0000deadbeef0000");
     BOOST_CHECK(vchSalt.size() == WALLET_CRYPTO_SALT_SIZE);
     CCrypter crypt;
     crypt.SetKeyFromPassphrase("passphrase", vchSalt, 25000, 0);

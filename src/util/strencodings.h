@@ -13,6 +13,7 @@
 #include <span.h>
 #include <util/string.h>
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -66,6 +67,87 @@ template <typename Byte = uint8_t>
 std::vector<Byte> ParseHex(std::string_view hex_str)
 {
     return TryParseHex<Byte>(hex_str).value_or(std::vector<Byte>{});
+}
+
+/**
+ * Max size fixed at compile time.
+ * Created to be used on the border between runtime and compile time which a
+ * dynamically allocating std::vector cannot cross.
+ * The type was created in preference over std::array to be able to parse hex
+ * strings at compile time which may contain whitespace, making exact size()
+ * unknown ahead of template instantiation.
+ */
+template<typename T, size_t N>
+class FixedVec
+{
+    std::array<T, N> m_data{};
+    size_t m_size{0};
+
+public:
+    constexpr const T* data() const { return m_data.data(); }
+    constexpr size_t size() const { return m_size; }
+    constexpr const T* begin() const { return data(); }
+    constexpr const T* end() const { return data() + m_size; }
+    constexpr void push_back(const T& v)
+    {
+        assert(m_size < N);
+        m_data[m_size] = v;
+        ++m_size;
+    }
+
+    /// Enables creation of a runtime allocated vector when necessary.
+    // NOT just a plain `operator std::vector<T>()` since we want to expose
+    // allocations.
+    constexpr std::vector<T> to_dynamic() const
+    {
+        return {begin(), end()};
+    }
+};
+
+template <typename T, size_t N>
+constexpr bool operator==(const std::vector<T>& a, const FixedVec<T, N>& b)
+{
+    return std::ranges::equal(a, b);
+}
+
+constexpr inline bool IsSpace(char c) noexcept;
+template <typename Byte = uint8_t, size_t Size>
+consteval FixedVec<Byte, Size / 2> ParseHex(const char (&hex_str)[Size])
+{
+    // Non lookup table version of HexDigit().
+    auto from_hex = [](const uint8_t c) -> std::optional<uint8_t> {
+        if (c >= '0' && c <= '9')
+            return std::make_optional<uint8_t>(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            return std::make_optional<uint8_t>(c - uint8_t{'a' - 0xA});
+        else if (c >= 'A' && c <= 'F')
+            return std::make_optional<uint8_t>(c - uint8_t{'A' - 0xA});
+        else
+            return std::nullopt;
+    };
+
+    FixedVec<Byte, Size / 2> rv;
+    size_t it = 0;
+    while (it < (Size - 1)) { // -1 - Assumes null-term at the end.
+        if (IsSpace(hex_str[it])) {
+            ++it;
+            continue;
+        }
+        auto c1 = from_hex(hex_str[it++]);
+        if (it >= Size)
+            return {};
+        if (!c1.has_value())
+            return {};
+        auto c1_value = c1.value();
+        c1_value <<= 4;
+        Byte elem{c1_value};
+        auto c2 = from_hex(hex_str[it++]);
+        if (!c2.has_value())
+            return {};
+        elem |= Byte{c2.value()};
+        rv.push_back(elem);
+    }
+    return rv;
 }
 /* Returns true if each character in str is a hex character, and has an even
  * number of hex digits.*/

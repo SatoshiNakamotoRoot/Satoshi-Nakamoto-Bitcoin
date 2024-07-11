@@ -145,56 +145,65 @@ static const unsigned char ParseHex_expected[65] = {
 };
 BOOST_AUTO_TEST_CASE(parse_hex)
 {
+    // Forces compile time evaluation so we use the correct ParseHex() overload.
+    auto compile_time = [] (auto input) consteval {
+        return input;
+    };
+
     std::vector<unsigned char> result;
     std::vector<unsigned char> expected(ParseHex_expected, ParseHex_expected + sizeof(ParseHex_expected));
     // Basic test vector
-    result = ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f");
+    result = compile_time(ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f")).to_dynamic();
+    BOOST_CHECK_EQUAL_COLLECTIONS(result.begin(), result.end(), expected.begin(), expected.end());
+    result = ParseHex("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f"sv);
     BOOST_CHECK_EQUAL_COLLECTIONS(result.begin(), result.end(), expected.begin(), expected.end());
     result = TryParseHex<uint8_t>("04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5f").value();
     BOOST_CHECK_EQUAL_COLLECTIONS(result.begin(), result.end(), expected.begin(), expected.end());
 
     // Spaces between bytes must be supported
-    result = ParseHex("12 34 56 78");
-    BOOST_CHECK(result.size() == 4 && result[0] == 0x12 && result[1] == 0x34 && result[2] == 0x56 && result[3] == 0x78);
-    result = TryParseHex<uint8_t>("12 34 56 78").value();
-    BOOST_CHECK(result.size() == 4 && result[0] == 0x12 && result[1] == 0x34 && result[2] == 0x56 && result[3] == 0x78);
+    BOOST_CHECK(std::vector<uint8_t>({0x12, 0x34, 0x56, 0x78}) == compile_time(ParseHex("12 34 56 78")));
+    BOOST_CHECK(std::vector<uint8_t>({0x12, 0x34, 0x56, 0x78}) == ParseHex("12 34 56 78"sv));
+    BOOST_CHECK(std::vector<uint8_t>({0x12, 0x34, 0x56, 0x78}) == TryParseHex<uint8_t>("12 34 56 78").value());
 
     // Leading space must be supported (used in BerkeleyEnvironment::Salvage)
-    result = ParseHex(" 89 34 56 78");
-    BOOST_CHECK(result.size() == 4 && result[0] == 0x89 && result[1] == 0x34 && result[2] == 0x56 && result[3] == 0x78);
-    result = TryParseHex<uint8_t>(" 89 34 56 78").value();
-    BOOST_CHECK(result.size() == 4 && result[0] == 0x89 && result[1] == 0x34 && result[2] == 0x56 && result[3] == 0x78);
+    BOOST_CHECK(std::vector<uint8_t>({0x89, 0x34, 0x56, 0x78}) == compile_time(ParseHex(" 89 34 56 78")));
+    BOOST_CHECK(std::vector<uint8_t>({0x89, 0x34, 0x56, 0x78}) == ParseHex(" 89 34 56 78"sv));
+    BOOST_CHECK(std::vector<uint8_t>({0x89, 0x34, 0x56, 0x78}) == TryParseHex<uint8_t>(" 89 34 56 78").value());
 
     // Mixed case and spaces are supported
-    result = ParseHex("     Ff        aA    ");
-    BOOST_CHECK(result.size() == 2 && result[0] == 0xff && result[1] == 0xaa);
-    result = TryParseHex<uint8_t>("     Ff        aA    ").value();
-    BOOST_CHECK(result.size() == 2 && result[0] == 0xff && result[1] == 0xaa);
+    BOOST_CHECK(std::vector<uint8_t>({0xff, 0xaa}) == compile_time(ParseHex("     Ff        aA    ")));
+    BOOST_CHECK(std::vector<uint8_t>({0xff, 0xaa}) == ParseHex("     Ff        aA    "sv));
+    BOOST_CHECK(std::vector<uint8_t>({0xff, 0xaa}) == TryParseHex<uint8_t>("     Ff        aA    ").value());
 
     // Empty string is supported
-    result = ParseHex("");
-    BOOST_CHECK(result.size() == 0);
-    result = TryParseHex<uint8_t>("").value();
-    BOOST_CHECK(result.size() == 0);
+    BOOST_CHECK(compile_time(ParseHex("")).size() == 0);
+    BOOST_CHECK(ParseHex(""sv).size() == 0);
+    BOOST_CHECK(TryParseHex<uint8_t>("").value().size() == 0);
 
     // Spaces between nibbles is treated as invalid
-    BOOST_CHECK_EQUAL(ParseHex("AAF F").size(), 0);
+    BOOST_CHECK_EQUAL(compile_time(ParseHex("AAF F")).size(), 0);
+    BOOST_CHECK_EQUAL(ParseHex("AAF F"sv).size(), 0);
     BOOST_CHECK(!TryParseHex("AAF F").has_value());
 
     // Embedded null is treated as invalid
-    const std::string with_embedded_null{" 11 "s
-                                         " \0 "
-                                         " 22 "s};
-    BOOST_CHECK_EQUAL(with_embedded_null.size(), 11);
-    BOOST_CHECK_EQUAL(ParseHex(with_embedded_null).size(), 0);
-    BOOST_CHECK(!TryParseHex(with_embedded_null).has_value());
+    constexpr char with_embedded_null[] = " 11 "
+                                          " \0 "
+                                          " 22 ";
+    const std::string_view with_embedded_null_str(with_embedded_null, 11);
+    BOOST_CHECK_EQUAL(sizeof(with_embedded_null), 12);
+    BOOST_CHECK_EQUAL(with_embedded_null_str.size(), 11);
+    BOOST_CHECK_EQUAL(compile_time(ParseHex(with_embedded_null)).size(), 0);
+    BOOST_CHECK_EQUAL(ParseHex(with_embedded_null_str).size(), 0);
+    BOOST_CHECK(!TryParseHex(with_embedded_null_str).has_value());
 
     // Non-hex is treated as invalid
-    BOOST_CHECK_EQUAL(ParseHex("1234 invalid 1234").size(), 0);
+    BOOST_CHECK_EQUAL(compile_time(ParseHex("1234 invalid 1234")).size(), 0);
+    BOOST_CHECK_EQUAL(ParseHex("1234 invalid 1234"sv).size(), 0);
     BOOST_CHECK(!TryParseHex("1234 invalid 1234").has_value());
 
     // Truncated input is treated as invalid
-    BOOST_CHECK_EQUAL(ParseHex("12 3").size(), 0);
+    BOOST_CHECK_EQUAL(compile_time(ParseHex("12 3")).size(), 0);
+    BOOST_CHECK_EQUAL(ParseHex("12 3"sv).size(), 0);
     BOOST_CHECK(!TryParseHex("12 3").has_value());
 }
 
