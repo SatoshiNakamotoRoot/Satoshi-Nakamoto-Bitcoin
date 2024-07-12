@@ -8,8 +8,10 @@ $(package)_build_subdir=build
 # This compiles a few libs unnecessarily because date_time and test don't have
 # header-only build/install options
 
+#install_name_tool is unused, so set it to the `true` binary so that CMake thinks it exists
 define $(package)_set_vars
   $(package)_config_opts=-DBOOST_INCLUDE_LIBRARIES="date_time;multi_index;signals2;test" -DBOOST_INSTALL_LAYOUT=system
+  $(package)_config_opts_darwin=-DCMAKE_INSTALL_NAME_TOOL=true
 endef
 
 define $(package)_config_cmds
