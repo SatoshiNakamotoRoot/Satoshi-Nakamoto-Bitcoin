@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <uint256.h>
+#include <util/time.h>
 
 namespace node {
 struct CBlockTemplate;
@@ -36,6 +37,18 @@ public:
 
     //! Returns the hash for the tip of this chain
     virtual std::optional<uint256> getTipHash() = 0;
+
+    /**
+     * Waits for fees in the next block to rise, a new tip or the timeout.
+     *
+     * @param[in] timeout how long to wait for a fee increase
+     * @param[in] tip block hash that the most recent template builds on
+     * @param[in] fee_delta currently ignored: how much total fees in the next block should rise.
+     * @param[in] fees_before currently ignored: fees for the most recent template
+     *
+     * @returns true if fees increased, false if a new tip arrives or the timeout occurs
+     */
+    virtual bool waitFeesChanged(MillisecondsDouble timeout, uint256 tip, CAmount fee_delta = 0, CAmount fees_before = 0) = 0;
 
    /**
      * Construct a new block template
