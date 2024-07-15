@@ -211,16 +211,18 @@ BasicTestingSetup::~BasicTestingSetup()
     gArgs.ClearArgs();
 }
 
-ChainTestingSetup::ChainTestingSetup(const ChainType chainType, const std::vector<const char*>& extra_args)
+ChainTestingSetup::ChainTestingSetup(const ChainType chainType, const std::vector<const char*>& extra_args, const bool setup_validation_interface)
     : BasicTestingSetup(chainType, extra_args)
 {
     const CChainParams& chainparams = Params();
 
     // We have to run a scheduler thread to prevent ActivateBestChain
     // from blocking due to queue overrun.
-    m_node.scheduler = std::make_unique<CScheduler>();
-    m_node.scheduler->m_service_thread = std::thread(util::TraceThread, "scheduler", [&] { m_node.scheduler->serviceQueue(); });
-    m_node.validation_signals = std::make_unique<ValidationSignals>(std::make_unique<SerialTaskRunner>(*m_node.scheduler));
+    if (setup_validation_interface) {
+        m_node.scheduler = std::make_unique<CScheduler>();
+        m_node.scheduler->m_service_thread = std::thread(util::TraceThread, "scheduler", [&] { m_node.scheduler->serviceQueue(); });
+        m_node.validation_signals = std::make_unique<ValidationSignals>(std::make_unique<SerialTaskRunner>(*m_node.scheduler));
+    }
 
     m_node.fee_estimator = std::make_unique<CBlockPolicyEstimator>(FeeestPath(*m_node.args), DEFAULT_ACCEPT_STALE_FEE_ESTIMATES);
     bilingual_str error{};
@@ -255,7 +257,7 @@ ChainTestingSetup::ChainTestingSetup(const ChainType chainType, const std::vecto
 ChainTestingSetup::~ChainTestingSetup()
 {
     if (m_node.scheduler) m_node.scheduler->stop();
-    m_node.validation_signals->FlushBackgroundCallbacks();
+    if (m_node.validation_signals) m_node.validation_signals->FlushBackgroundCallbacks();
     m_node.connman.reset();
     m_node.banman.reset();
     m_node.addrman.reset();
@@ -297,8 +299,10 @@ TestingSetup::TestingSetup(
     const ChainType chainType,
     const std::vector<const char*>& extra_args,
     const bool coins_db_in_memory,
-    const bool block_tree_db_in_memory)
-    : ChainTestingSetup(chainType, extra_args)
+    const bool block_tree_db_in_memory,
+    const bool setup_net,
+    const bool setup_validation_interface)
+    : ChainTestingSetup(chainType, extra_args, setup_validation_interface)
 {
     m_coins_db_in_memory = coins_db_in_memory;
     m_block_tree_db_in_memory = block_tree_db_in_memory;
@@ -307,6 +311,8 @@ TestingSetup::TestingSetup(
     RegisterAllCoreRPCCommands(tableRPC);
 
     LoadVerifyActivateChainstate();
+
+    if (!setup_net) return;
 
     m_node.netgroupman = std::make_unique<NetGroupManager>(/*asmap=*/std::vector<bool>());
     m_node.addrman = std::make_unique<AddrMan>(*m_node.netgroupman,
