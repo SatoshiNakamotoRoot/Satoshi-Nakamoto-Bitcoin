@@ -58,13 +58,7 @@ static std::string ArrayToString(const unsigned char A[], unsigned int width)
     return Stream.str();
 }
 
-inline uint160 uint160S(const char *str)
-{
-    uint160 rv;
-    rv.SetHex(str);
-    return rv;
-}
-inline uint160 uint160S(const std::string& str)
+inline uint160 uint160S(std::string_view str)
 {
     uint160 rv;
     rv.SetHex(str);
@@ -102,6 +96,8 @@ BOOST_AUTO_TEST_CASE( basics ) // constructors, equality, inequality
     BOOST_CHECK(uint256S("0x"+MaxL.ToString()) == MaxL);
     BOOST_CHECK(uint256S(R1L.ToString()) == R1L);
     BOOST_CHECK(uint256S("   0x"+R1L.ToString()+"   ") == R1L);
+    BOOST_CHECK(uint256S("   0x"+R1L.ToString()+"-trash;%^&   ") == R1L);
+    BOOST_CHECK(uint256S("\t \n  \n \f\n\r\t\v\t   0x"+R1L.ToString()+"  \t \n  \n \f\n\r\t\v\t ") == R1L);
     BOOST_CHECK(uint256S("") == ZeroL);
     BOOST_CHECK(R1L == uint256S(R1ArrayHex));
     BOOST_CHECK(uint256(R1L) == R1L);
@@ -115,6 +111,8 @@ BOOST_AUTO_TEST_CASE( basics ) // constructors, equality, inequality
     BOOST_CHECK(uint160S("0x"+MaxS.ToString()) == MaxS);
     BOOST_CHECK(uint160S(R1S.ToString()) == R1S);
     BOOST_CHECK(uint160S("   0x"+R1S.ToString()+"   ") == R1S);
+    BOOST_CHECK(uint160S("   0x"+R1S.ToString()+"-trash;%^&   ") == R1S);
+    BOOST_CHECK(uint160S(" \t \n  \n \f\n\r\t\v\t  0x"+R1S.ToString()+"   \t \n  \n \f\n\r\t\v\t") == R1S);
     BOOST_CHECK(uint160S("") == ZeroS);
     BOOST_CHECK(R1S == uint160S(R1ArrayHex));
 
