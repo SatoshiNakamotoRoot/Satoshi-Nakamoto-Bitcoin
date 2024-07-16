@@ -4,11 +4,6 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test for assumeutxo wallet related behavior.
 See feature_assumeutxo.py for background.
-
-## Possible test improvements
-
-- TODO: test loading a wallet (backup) on a pruned node
-
 """
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -33,17 +28,18 @@ class AssumeutxoTest(BitcoinTestFramework):
 
     def set_test_params(self):
         """Use the pregenerated, deterministic chain up to height 199."""
-        self.num_nodes = 2
+        self.num_nodes = 3
         self.rpc_timeout = 120
         self.extra_args = [
             [],
             [],
+            ["-prune=1"]
         ]
 
     def setup_network(self):
         """Start with the nodes disconnected so that one can generate a snapshot
         including blocks the other hasn't yet seen."""
-        self.add_nodes(2)
+        self.add_nodes(3)
         self.start_nodes(extra_args=self.extra_args)
 
     def test_descriptor_import(self, node, wallet_name, key, timestamp, expected_error_message=None):
@@ -59,6 +55,20 @@ class AssumeutxoTest(BitcoinTestFramework):
             assert_equal(result[0]['error']['code'], -1)
             assert_equal(result[0]['error']['message'], expected_error_message)
 
+    def validate_snapshot_import(self, node, loaded, base_hash):
+        assert_equal(loaded['coins_loaded'], SNAPSHOT_BASE_HEIGHT)
+        assert_equal(loaded['base_height'], SNAPSHOT_BASE_HEIGHT)
+
+        normal, snapshot = node.getchainstates()["chainstates"]
+        assert_equal(normal['blocks'], START_HEIGHT)
+        assert_equal(normal.get('snapshot_blockhash'), None)
+        assert_equal(normal['validated'], True)
+        assert_equal(snapshot['blocks'], SNAPSHOT_BASE_HEIGHT)
+        assert_equal(snapshot['snapshot_blockhash'], base_hash)
+        assert_equal(snapshot['validated'], False)
+
+        assert_equal(node.getblockchaininfo()["blocks"], SNAPSHOT_BASE_HEIGHT)
+
     def run_test(self):
         """
         Bring up two (disconnected) nodes, mine some new blocks on the first,
@@ -69,6 +79,7 @@ class AssumeutxoTest(BitcoinTestFramework):
         """
         n0 = self.nodes[0]
         n1 = self.nodes[1]
+        n2 = self.nodes[2]
 
         self.mini_wallet = MiniWallet(n0)
 
@@ -92,6 +103,7 @@ class AssumeutxoTest(BitcoinTestFramework):
 
             # make n1 aware of the new header, but don't give it the block.
             n1.submitheader(newblock)
+            n2.submitheader(newblock)
 
         # Ensure everyone is seeing the same headers.
         for n in self.nodes:
@@ -127,21 +139,16 @@ class AssumeutxoTest(BitcoinTestFramework):
         self.log.info(
             f"Loading snapshot into second node from {dump_output['path']}")
         loaded = n1.loadtxoutset(dump_output['path'])
-        assert_equal(loaded['coins_loaded'], SNAPSHOT_BASE_HEIGHT)
-        assert_equal(loaded['base_height'], SNAPSHOT_BASE_HEIGHT)
-
-        normal, snapshot = n1.getchainstates()["chainstates"]
-        assert_equal(normal['blocks'], START_HEIGHT)
-        assert_equal(normal.get('snapshot_blockhash'), None)
-        assert_equal(normal['validated'], True)
-        assert_equal(snapshot['blocks'], SNAPSHOT_BASE_HEIGHT)
-        assert_equal(snapshot['snapshot_blockhash'], dump_output['base_hash'])
-        assert_equal(snapshot['validated'], False)
-
-        assert_equal(n1.getblockchaininfo()["blocks"], SNAPSHOT_BASE_HEIGHT)
+        self.validate_snapshot_import(n1, loaded, dump_output['base_hash'])
 
         self.log.info("Backup can't be loaded during background sync")
-        assert_raises_rpc_error(-4, "Wallet loading failed. Error loading wallet. Wallet requires blocks to be downloaded, and software does not currently support loading wallets while blocks are being downloaded out of order when using assumeutxo snapshots. Wallet should be able to load successfully after node sync reaches height 299", n1.restorewallet, "w", "backup_w.dat")
+        error_message = "Wallet loading failed. Error loading wallet. Wallet requires blocks to be downloaded, and software does not currently support loading wallets while blocks are being downloaded out of order when using assumeutxo snapshots. Wallet should be able to load successfully after node sync reaches height 299"
+        assert_raises_rpc_error(-4, error_message, n1.restorewallet, "w", "backup_w.dat")
+
+        self.log.info("Backup can't be loaded during background sync (pruned node)")
+        loaded = n2.loadtxoutset(dump_output['path'])
+        self.validate_snapshot_import(n2, loaded, dump_output['base_hash'])
+        assert_raises_rpc_error(-4,  error_message, n2.restorewallet, "w", "backup_w.dat")
 
         self.log.info("Test loading descriptors during background sync")
         wallet_name = "w1"
@@ -184,6 +191,14 @@ class AssumeutxoTest(BitcoinTestFramework):
 
         self.log.info("Ensuring wallet can be restored from backup")
         n1.restorewallet("w", "backup_w.dat")
+
+        # Now make sure background validation succeeds on n2
+        # and try restoring the wallet
+        self.connect_nodes(0, 2)
+        self.sync_blocks(nodes=(n0, n2))
+        self.wait_until(lambda: len(n2.getchainstates()['chainstates']) == 1)
+        self.log.info("Ensuring wallet can be restored from backup (pruned node)")
+        n2.restorewallet("w", "backup_w.dat")
 
         self.log.info("Ensuring descriptors can be loaded after background sync")
         n1.loadwallet(wallet_name)
