@@ -21,10 +21,53 @@
 #include <cerrno>
 #include <string>
 
+namespace fs {
+
+std::function<bool(const std::filesystem::path&)> g_mock_create_dirs{nullptr};
+
+std::function<bool(const path&)> g_mock_exists{nullptr};
+
+std::function<bool(const std::filesystem::path&)> g_mock_remove{nullptr};
+
+bool remove(const std::filesystem::path& p)
+{
+    if (g_mock_remove) {
+        return g_mock_remove(p);
+    }
+    return std::filesystem::remove(p);
+}
+
+std::function<bool(const std::filesystem::path&, std::error_code&)> g_mock_remove_ec{nullptr};
+
+bool remove(const std::filesystem::path& p, std::error_code& ec)
+{
+    if (g_mock_remove) {
+        return g_mock_remove_ec(p, ec);
+    }
+    return std::filesystem::remove(p, ec);
+}
+
+std::function<void(const std::filesystem::path&, const std::filesystem::path&)> g_mock_rename{nullptr};
+
+void rename(const std::filesystem::path& old_p, const std::filesystem::path& new_p)
+{
+    if (g_mock_rename) {
+        return g_mock_rename(old_p, new_p);
+    }
+    return std::filesystem::rename(old_p, new_p);
+}
+
+} // fs
+
 namespace fsbridge {
+
+std::function<FILE*(const fs::path&, const char*)> g_mock_fopen{nullptr};
 
 FILE *fopen(const fs::path& p, const char *mode)
 {
+    if (g_mock_fopen) {
+        return g_mock_fopen(p, mode);
+    }
 #ifndef WIN32
     return ::fopen(p.c_str(), mode);
 #else

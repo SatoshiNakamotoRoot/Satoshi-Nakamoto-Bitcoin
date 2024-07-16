@@ -90,8 +90,13 @@ void ReleaseDirectoryLocks()
     dir_locks.clear();
 }
 
+std::function<bool(const fs::path&, uint64_t)> g_mock_check_disk_space{nullptr};
+
 bool CheckDiskSpace(const fs::path& dir, uint64_t additional_bytes)
 {
+    if (g_mock_check_disk_space) {
+        return g_mock_check_disk_space(dir, additional_bytes);
+    }
     constexpr uint64_t min_disk_space = 52428800; // 50 MiB
 
     uint64_t free_bytes_available = fs::space(dir).available;
@@ -249,7 +254,7 @@ fs::path GetSpecialFolderPath(int nFolder, bool fCreate)
 bool RenameOver(fs::path src, fs::path dest)
 {
     std::error_code error;
-    fs::rename(src, dest, error);
+    std::filesystem::rename(src, dest, error);
     return !error;
 }
 
