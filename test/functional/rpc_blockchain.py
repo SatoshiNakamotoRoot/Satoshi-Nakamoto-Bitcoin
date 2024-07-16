@@ -633,6 +633,11 @@ class BlockchainTest(BitcoinTestFramework):
         assert 'previousblockhash' not in node.getblock(node.getblockhash(0))
         assert 'nextblockhash' not in node.getblock(node.getbestblockhash())
 
+        self.log.info("Test getblock when only header is known")
+        block = self.generateblock(node, output="raw(55)", transactions=[], submit=False)
+        node.submitheader(block["hex"])
+        assert_raises_rpc_error(-1, "Block not available (not fully downloaded)", lambda: node.getblock(block["hash"]))
+
 
 if __name__ == '__main__':
     BlockchainTest().main()
