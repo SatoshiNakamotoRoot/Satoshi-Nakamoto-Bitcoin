@@ -887,10 +887,21 @@ private:
      *
      * Memory used: 1.3 MB
      */
-    CRollingBloomFilter m_recent_rejects GUARDED_BY(::cs_main){120'000, 0.000'001};
+    std::unique_ptr<CRollingBloomFilter> m_recent_rejects GUARDED_BY(::cs_main){nullptr};
     /** Block hash of chain tip the last time we reset m_recent_rejects and
-     * m_recent_rejects_reconsiderable. */
+     * RecentRejectsReconsiderableFilter(). */
     uint256 hashRecentRejectsChainTip GUARDED_BY(cs_main);
+
+    CRollingBloomFilter& RecentRejectsFilter() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+
+        if (!m_recent_rejects) {
+            m_recent_rejects = std::make_unique<CRollingBloomFilter>(120'000, 0.000'001);
+        }
+
+        return *m_recent_rejects;
+    }
 
     /**
      * Filter for:
@@ -912,7 +923,18 @@ private:
      *
      * Parameters are picked to be the same as m_recent_rejects, with the same rationale.
      */
-    CRollingBloomFilter m_recent_rejects_reconsiderable GUARDED_BY(::cs_main){120'000, 0.000'001};
+    std::unique_ptr<CRollingBloomFilter> m_recent_rejects_reconsiderable GUARDED_BY(::cs_main){nullptr};
+
+    CRollingBloomFilter& RecentRejectsReconsiderableFilter() EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        AssertLockHeld(::cs_main);
+
+        if (!m_recent_rejects_reconsiderable) {
+            m_recent_rejects_reconsiderable = std::make_unique<CRollingBloomFilter>(120'000, 0.000'001);
+        }
+
+        return *m_recent_rejects_reconsiderable;
+    }
 
     /*
      * Filter for transactions that have been recently confirmed.
@@ -930,7 +952,18 @@ private:
      * same probability that we have in the reject filter).
      */
     Mutex m_recent_confirmed_transactions_mutex;
-    CRollingBloomFilter m_recent_confirmed_transactions GUARDED_BY(m_recent_confirmed_transactions_mutex){48'000, 0.000'001};
+    std::unique_ptr<CRollingBloomFilter> m_recent_confirmed_transactions GUARDED_BY(m_recent_confirmed_transactions_mutex){nullptr};
+
+    CRollingBloomFilter& RecentConfirmedTransactionsFilter() EXCLUSIVE_LOCKS_REQUIRED(m_recent_confirmed_transactions_mutex)
+    {
+        AssertLockHeld(m_recent_confirmed_transactions_mutex);
+
+        if (!m_recent_confirmed_transactions) {
+            m_recent_confirmed_transactions = std::make_unique<CRollingBloomFilter>(48'000, 0.000'001);
+        }
+
+        return *m_recent_confirmed_transactions;
+    }
 
     /**
      * For sending `inv`s to inbound peers, we use a single (exponentially
@@ -2089,9 +2122,9 @@ void PeerManagerImpl::BlockConnected(
     {
         LOCK(m_recent_confirmed_transactions_mutex);
         for (const auto& ptx : pblock->vtx) {
-            m_recent_confirmed_transactions.insert(ptx->GetHash().ToUint256());
+            RecentConfirmedTransactionsFilter().insert(ptx->GetHash().ToUint256());
             if (ptx->HasWitness()) {
-                m_recent_confirmed_transactions.insert(ptx->GetWitnessHash().ToUint256());
+                RecentConfirmedTransactionsFilter().insert(ptx->GetWitnessHash().ToUint256());
             }
         }
     }
@@ -2115,7 +2148,7 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
     // presumably the most common case of relaying a confirmed transaction
     // should be just after a new block containing it is found.
     LOCK(m_recent_confirmed_transactions_mutex);
-    m_recent_confirmed_transactions.reset();
+    RecentConfirmedTransactionsFilter().reset();
 }
 
 /**
@@ -2260,8 +2293,8 @@ bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconside
         // or a double-spend. Reset the rejects filter and give those
         // txs a second chance.
         hashRecentRejectsChainTip = m_chainman.ActiveChain().Tip()->GetBlockHash();
-        m_recent_rejects.reset();
-        m_recent_rejects_reconsiderable.reset();
+        RecentRejectsFilter().reset();
+        RecentRejectsReconsiderableFilter().reset();
     }
 
     const uint256& hash = gtxid.GetHash();
@@ -2284,14 +2317,14 @@ bool PeerManagerImpl::AlreadyHaveTx(const GenTxid& gtxid, bool include_reconside
         if (m_orphanage.HaveTx(Wtxid::FromUint256(hash))) return true;
     }
 
-    if (include_reconsiderable && m_recent_rejects_reconsiderable.contains(hash)) return true;
+    if (include_reconsiderable && RecentRejectsReconsiderableFilter().contains(hash)) return true;
 
     {
         LOCK(m_recent_confirmed_transactions_mutex);
-        if (m_recent_confirmed_transactions.contains(hash)) return true;
+        if (RecentConfirmedTransactionsFilter().contains(hash)) return true;
     }
 
-    return m_recent_rejects.contains(hash) || m_mempool.exists(gtxid);
+    return RecentRejectsFilter().contains(hash) || m_mempool.exists(gtxid);
 }
 
 bool PeerManagerImpl::AlreadyHaveBlock(const uint256& block_hash)
@@ -3182,9 +3215,9 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
             // If the result is TX_RECONSIDERABLE, add it to m_recent_rejects_reconsiderable
             // because we should not download or submit this transaction by itself again, but may
             // submit it as part of a package later.
-            m_recent_rejects_reconsiderable.insert(ptx->GetWitnessHash().ToUint256());
+            RecentRejectsReconsiderableFilter().insert(ptx->GetWitnessHash().ToUint256());
         } else {
-            m_recent_rejects.insert(ptx->GetWitnessHash().ToUint256());
+            RecentRejectsFilter().insert(ptx->GetWitnessHash().ToUint256());
         }
         m_txrequest.ForgetTxHash(ptx->GetWitnessHash());
         // If the transaction failed for TX_INPUTS_NOT_STANDARD,
@@ -3198,7 +3231,7 @@ void PeerManagerImpl::ProcessInvalidTx(NodeId nodeid, const CTransactionRef& ptx
         // We only add the txid if it differs from the wtxid, to avoid wasting entries in the
         // rolling bloom filter.
         if (state.GetResult() == TxValidationResult::TX_INPUTS_NOT_STANDARD && ptx->HasWitness()) {
-            m_recent_rejects.insert(ptx->GetHash().ToUint256());
+            RecentRejectsFilter().insert(ptx->GetHash().ToUint256());
             m_txrequest.ForgetTxHash(ptx->GetHash());
         }
         if (maybe_add_extra_compact_tx && RecursiveDynamicUsage(*ptx) < 100000) {
@@ -3253,7 +3286,7 @@ void PeerManagerImpl::ProcessPackageResult(const PackageToValidate& package_to_v
     const auto& senders = package_to_validate.m_senders;
 
     if (package_result.m_state.IsInvalid()) {
-        m_recent_rejects_reconsiderable.insert(GetPackageHash(package));
+        RecentRejectsReconsiderableFilter().insert(GetPackageHash(package));
     }
     // We currently only expect to process 1-parent-1-child packages. Remove if this changes.
     if (!Assume(package.size() == 2)) return;
@@ -3307,7 +3340,7 @@ std::optional<PeerManagerImpl::PackageToValidate> PeerManagerImpl::Find1P1CPacka
 
     const auto& parent_wtxid{ptx->GetWitnessHash()};
 
-    Assume(m_recent_rejects_reconsiderable.contains(parent_wtxid.ToUint256()));
+    Assume(RecentRejectsReconsiderableFilter().contains(parent_wtxid.ToUint256()));
 
     // Prefer children from this peer. This helps prevent censorship attempts in which an attacker
     // sends lots of fake children for the parent, and we (unluckily) keep selecting the fake
@@ -3319,7 +3352,7 @@ std::optional<PeerManagerImpl::PackageToValidate> PeerManagerImpl::Find1P1CPacka
     // most recent) one efficiently.
     for (const auto& child : cpfp_candidates_same_peer) {
         Package maybe_cpfp_package{ptx, child};
-        if (!m_recent_rejects_reconsiderable.contains(GetPackageHash(maybe_cpfp_package))) {
+        if (!RecentRejectsReconsiderableFilter().contains(GetPackageHash(maybe_cpfp_package))) {
             return PeerManagerImpl::PackageToValidate{ptx, child, nodeid, nodeid};
         }
     }
@@ -3343,10 +3376,10 @@ std::optional<PeerManagerImpl::PackageToValidate> PeerManagerImpl::Find1P1CPacka
 
     for (const auto index : tx_indices) {
         // If we already tried a package and failed for any reason, the combined hash was
-        // cached in m_recent_rejects_reconsiderable.
+        // cached in RecentRejectsReconsiderableFilter().
         const auto [child_tx, child_sender] = cpfp_candidates_different_peer.at(index);
         Package maybe_cpfp_package{ptx, child_tx};
-        if (!m_recent_rejects_reconsiderable.contains(GetPackageHash(maybe_cpfp_package))) {
+        if (!RecentRejectsReconsiderableFilter().contains(GetPackageHash(maybe_cpfp_package))) {
             return PeerManagerImpl::PackageToValidate{ptx, child_tx, nodeid, child_sender};
         }
     }
@@ -4538,7 +4571,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 }
             }
 
-            if (m_recent_rejects_reconsiderable.contains(wtxid)) {
+            if (RecentRejectsReconsiderableFilter().contains(wtxid)) {
                 // When a transaction is already in m_recent_rejects_reconsiderable, we shouldn't submit
                 // it by itself again. However, look for a matching child in the orphanage, as it is
                 // possible that they succeed as a package.
@@ -4591,15 +4624,15 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             std::sort(unique_parents.begin(), unique_parents.end());
             unique_parents.erase(std::unique(unique_parents.begin(), unique_parents.end()), unique_parents.end());
 
-            // Distinguish between parents in m_recent_rejects and m_recent_rejects_reconsiderable.
+            // Distinguish between parents in m_recent_rejects and RecentRejectsReconsiderableFilter().
             // We can tolerate having up to 1 parent in m_recent_rejects_reconsiderable since we
-            // submit 1p1c packages. However, fail immediately if any are in m_recent_rejects.
+            // submit 1p1c packages. However, fail immediately if any are in RecentRejectsFilter().
             std::optional<uint256> rejected_parent_reconsiderable;
             for (const uint256& parent_txid : unique_parents) {
-                if (m_recent_rejects.contains(parent_txid)) {
+                if (RecentRejectsFilter().contains(parent_txid)) {
                     fRejectedParents = true;
                     break;
-                } else if (m_recent_rejects_reconsiderable.contains(parent_txid) && !m_mempool.exists(GenTxid::Txid(parent_txid))) {
+                } else if (RecentRejectsReconsiderableFilter().contains(parent_txid) && !m_mempool.exists(GenTxid::Txid(parent_txid))) {
                     // More than 1 parent in m_recent_rejects_reconsiderable: 1p1c will not be
                     // sufficient to accept this package, so just give up here.
                     if (rejected_parent_reconsiderable.has_value()) {
@@ -4645,8 +4678,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 // regardless of what witness is provided, we will not accept
                 // this, so we don't need to allow for redownload of this txid
                 // from any of our non-wtxidrelay peers.
-                m_recent_rejects.insert(tx.GetHash().ToUint256());
-                m_recent_rejects.insert(tx.GetWitnessHash().ToUint256());
+                RecentRejectsFilter().insert(tx.GetHash().ToUint256());
+                RecentRejectsFilter().insert(tx.GetWitnessHash().ToUint256());
                 m_txrequest.ForgetTxHash(tx.GetHash());
                 m_txrequest.ForgetTxHash(tx.GetWitnessHash());
             }
