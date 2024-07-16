@@ -17,6 +17,7 @@ from test_framework.script import (
     OP_EQUALVERIFY,
     OP_HASH160,
     OP_RETURN,
+    OP_TRUE,
     hash160,
     sha256,
 )
@@ -41,6 +42,8 @@ assert MIN_PADDING == 5
 # standardness checks
 DUMMY_MIN_OP_RETURN_SCRIPT = CScript([OP_RETURN] + ([OP_0] * (MIN_PADDING - 1)))
 assert len(DUMMY_MIN_OP_RETURN_SCRIPT) == MIN_PADDING
+
+PAY_TO_ANCHOR = CScript([OP_TRUE, bytes.fromhex("4e73")])
 
 def key_to_p2pk_script(key):
     key = check_key(key)
