@@ -58,13 +58,7 @@ static std::string ArrayToString(const unsigned char A[], unsigned int width)
     return Stream.str();
 }
 
-inline uint160 uint160S(const char *str)
-{
-    uint160 rv;
-    rv.SetHex(str);
-    return rv;
-}
-inline uint160 uint160S(const std::string& str)
+inline uint160 uint160S(std::string_view str)
 {
     uint160 rv;
     rv.SetHex(str);
