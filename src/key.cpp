@@ -273,17 +273,8 @@ bool CKey::SignSchnorr(const uint256& hash, Span<unsigned char> sig, const uint2
 {
     assert(sig.size() == 64);
     bool ret = 1;
-    KeyPair keypair = ComputeKeyPair();
+    KeyPair keypair = ComputeKeyPair(merkle_root);
     if (!keypair.IsValid()) return false;
-    if (merkle_root) {
-        secp256k1_xonly_pubkey pubkey;
-        ret &= secp256k1_keypair_xonly_pub(secp256k1_context_sign, &pubkey, nullptr, reinterpret_cast<const secp256k1_keypair*>(keypair.data()));
-        unsigned char pubkey_bytes[32];
-        ret &= secp256k1_xonly_pubkey_serialize(secp256k1_context_sign, pubkey_bytes, &pubkey);
-        uint256 tweak = XOnlyPubKey(pubkey_bytes).ComputeTapTweakHash(merkle_root->IsNull() ? nullptr : merkle_root);
-        ret &= secp256k1_keypair_xonly_tweak_add(secp256k1_context_static, reinterpret_cast<secp256k1_keypair*>(keypair.data()), tweak.data());
-    }
-    if (!ret) return false;
     ret &= secp256k1_schnorrsig_sign32(secp256k1_context_sign, sig.data(), hash.data(), reinterpret_cast<const secp256k1_keypair*>(keypair.data()), aux.data());
     if (ret) {
         // Additional verification step to prevent using a potentially corrupted signature
@@ -365,9 +356,9 @@ ECDHSecret CKey::ComputeBIP324ECDHSecret(const EllSwiftPubKey& their_ellswift, c
     return output;
 }
 
-KeyPair CKey::ComputeKeyPair() const
+KeyPair CKey::ComputeKeyPair(const uint256* merkle_root) const
 {
-    return KeyPair(*this);
+    return KeyPair(*this, merkle_root);
 }
 
 CKey GenerateRandomKey(bool compressed) noexcept
@@ -427,12 +418,20 @@ void CExtKey::Decode(const unsigned char code[BIP32_EXTKEY_SIZE]) {
     if ((nDepth == 0 && (nChild != 0 || ReadLE32(vchFingerprint) != 0)) || code[41] != 0) key = CKey();
 }
 
-KeyPair::KeyPair(const CKey& key)
+KeyPair::KeyPair(const CKey& key, const uint256* merkle_root)
 {
     static_assert(std::tuple_size<KeyType>() == sizeof(secp256k1_keypair));
     MakeKeyPairData();
 
     bool ret = secp256k1_keypair_create(secp256k1_context_sign, reinterpret_cast<secp256k1_keypair*>(m_keypair->data()), UCharCast(key.data()));
+    if (merkle_root) {
+        secp256k1_xonly_pubkey pubkey;
+        ret &= secp256k1_keypair_xonly_pub(secp256k1_context_sign, &pubkey, nullptr, reinterpret_cast<const secp256k1_keypair*>(m_keypair->data()));
+        unsigned char pubkey_bytes[32];
+        ret &= secp256k1_xonly_pubkey_serialize(secp256k1_context_sign, pubkey_bytes, &pubkey);
+        uint256 tweak = XOnlyPubKey(pubkey_bytes).ComputeTapTweakHash(merkle_root->IsNull() ? nullptr : merkle_root);
+        ret &= secp256k1_keypair_xonly_tweak_add(secp256k1_context_static, reinterpret_cast<secp256k1_keypair*>(m_keypair->data()), tweak.data());
+    }
     if (!ret) ClearKeyPairData();
 }
 
