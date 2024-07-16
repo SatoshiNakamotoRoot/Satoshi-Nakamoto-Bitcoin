@@ -10,6 +10,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <string_view>
 
 FastRandomContext g_insecure_rand_ctx;
 
@@ -26,7 +27,7 @@ void SeedRandomForTest(SeedRand seedtype)
     static const uint256 ctx_seed = []() {
         // If RANDOM_CTX_SEED is set, use that as seed.
         const char* num = std::getenv(RANDOM_CTX_SEED.c_str());
-        if (num) return uint256S(num);
+        if (num) return uint256S(std::string_view{num});
         // Otherwise use a (truly) random value.
         return GetRandHash();
     }();

@@ -254,7 +254,11 @@ public:
     bool IsNull() const { return m_keydata.IsNull(); }
 
     /** Construct an x-only pubkey from exactly 32 bytes. */
-    explicit XOnlyPubKey(Span<const unsigned char> bytes);
+    constexpr explicit XOnlyPubKey(Span<const unsigned char> bytes)
+    {
+        assert(bytes.size() == 32);
+        std::copy(bytes.begin(), bytes.end(), m_keydata.begin());
+    }
 
     /** Construct an x-only pubkey from a normal pubkey. */
     explicit XOnlyPubKey(const CPubKey& pubkey) : XOnlyPubKey(Span{pubkey}.subspan(1, 32)) {}
