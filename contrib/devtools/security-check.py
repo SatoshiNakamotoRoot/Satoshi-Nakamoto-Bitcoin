@@ -7,6 +7,7 @@ Perform basic security checks on a series of executables.
 Exit status will be 0 if successful, and the program will be silent.
 Otherwise the exit status will be 1 and it will log which executables failed which checks.
 '''
+import re
 import sys
 
 import lief
@@ -38,13 +39,13 @@ def check_ELF_RELRO(binary) -> bool:
 
     return have_gnu_relro and have_bindnow
 
-def check_ELF_Canary(binary) -> bool:
+def check_ELF_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
     return binary.has_symbol('__stack_chk_fail')
 
-def check_ELF_separate_code(binary):
+def check_ELF_SEPARATE_CODE(binary):
     '''
     Check that sections are appropriately separated in virtual memory,
     based on their permissions. This checks for missing -Wl,-z,separate-code
@@ -116,6 +117,21 @@ def check_ELF_control_flow(binary) -> bool:
         return True
     return False
 
+def check_ELF_FORTIFY(binary) -> bool:
+
+    chk_funcs = set()
+
+    for sym in binary.symbols:
+        match = re.search(r'__[a-z]*_chk', sym.name)
+        if match:
+            chk_funcs.add(match.group(0))
+
+    # ignore stack-protector and bdb
+    chk_funcs.discard('__stack_chk')
+    chk_funcs.discard('__db_chk')
+
+    return len(chk_funcs) >= 1
+
 def check_PE_DYNAMIC_BASE(binary) -> bool:
     '''PIE: DllCharacteristics bit 0x40 signifies dynamicbase (ASLR)'''
     return lief.PE.DLL_CHARACTERISTICS.DYNAMIC_BASE in binary.optional_header.dll_characteristics_lists
@@ -145,7 +161,7 @@ def check_PE_control_flow(binary) -> bool:
         return True
     return False
 
-def check_PE_Canary(binary) -> bool:
+def check_PE_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
@@ -163,7 +179,7 @@ def check_MACHO_FIXUP_CHAINS(binary) -> bool:
     '''
     return binary.has_dyld_chained_fixups
 
-def check_MACHO_Canary(binary) -> bool:
+def check_MACHO_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
@@ -206,8 +222,9 @@ BASE_ELF = [
     ('PIE', check_PIE),
     ('NX', check_NX),
     ('RELRO', check_ELF_RELRO),
-    ('Canary', check_ELF_Canary),
-    ('separate_code', check_ELF_separate_code),
+    ('CANARY', check_ELF_CANARY),
+    ('SEPARATE_CODE', check_ELF_SEPARATE_CODE),
+    ('FORTIFY', check_ELF_FORTIFY),
 ]
 
 BASE_PE = [
@@ -217,12 +234,12 @@ BASE_PE = [
     ('NX', check_NX),
     ('RELOC_SECTION', check_PE_RELOC_SECTION),
     ('CONTROL_FLOW', check_PE_control_flow),
-    ('Canary', check_PE_Canary),
+    ('CANARY', check_PE_CANARY),
 ]
 
 BASE_MACHO = [
     ('NOUNDEFS', check_MACHO_NOUNDEFS),
-    ('Canary', check_MACHO_Canary),
+    ('CANARY', check_MACHO_CANARY),
     ('FIXUP_CHAINS', check_MACHO_FIXUP_CHAINS),
 ]
 
