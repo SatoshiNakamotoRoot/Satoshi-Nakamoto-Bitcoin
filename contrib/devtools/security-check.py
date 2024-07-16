@@ -38,13 +38,13 @@ def check_ELF_RELRO(binary) -> bool:
 
     return have_gnu_relro and have_bindnow
 
-def check_ELF_Canary(binary) -> bool:
+def check_ELF_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
     return binary.has_symbol('__stack_chk_fail')
 
-def check_ELF_separate_code(binary):
+def check_ELF_SEPARATE_CODE(binary):
     '''
     Check that sections are appropriately separated in virtual memory,
     based on their permissions. This checks for missing -Wl,-z,separate-code
@@ -145,7 +145,7 @@ def check_PE_control_flow(binary) -> bool:
         return True
     return False
 
-def check_PE_Canary(binary) -> bool:
+def check_PE_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
@@ -163,7 +163,7 @@ def check_MACHO_FIXUP_CHAINS(binary) -> bool:
     '''
     return binary.has_dyld_chained_fixups
 
-def check_MACHO_Canary(binary) -> bool:
+def check_MACHO_CANARY(binary) -> bool:
     '''
     Check for use of stack canary
     '''
@@ -206,8 +206,8 @@ BASE_ELF = [
     ('PIE', check_PIE),
     ('NX', check_NX),
     ('RELRO', check_ELF_RELRO),
-    ('Canary', check_ELF_Canary),
-    ('separate_code', check_ELF_separate_code),
+    ('CANARY', check_ELF_CANARY),
+    ('SEPARATE_CODE', check_ELF_SEPARATE_CODE),
 ]
 
 BASE_PE = [
@@ -217,12 +217,12 @@ BASE_PE = [
     ('NX', check_NX),
     ('RELOC_SECTION', check_PE_RELOC_SECTION),
     ('CONTROL_FLOW', check_PE_control_flow),
-    ('Canary', check_PE_Canary),
+    ('CANARY', check_PE_CANARY),
 ]
 
 BASE_MACHO = [
     ('NOUNDEFS', check_MACHO_NOUNDEFS),
-    ('Canary', check_MACHO_Canary),
+    ('CANARY', check_MACHO_CANARY),
     ('FIXUP_CHAINS', check_MACHO_FIXUP_CHAINS),
 ]
 
