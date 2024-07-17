@@ -5,24 +5,50 @@
 #ifndef BITCOIN_INTERFACES_MINING_H
 #define BITCOIN_INTERFACES_MINING_H
 
-#include <memory>
-#include <optional>
+#include <node/types.h>
 #include <uint256.h>
 
+#include <memory>
+#include <optional>
+
 namespace node {
-struct CBlockTemplate;
 struct NodeContext;
 } // namespace node
 
 class BlockValidationState;
 class CBlock;
+class CBlockHeader;
 class CScript;
 
 namespace interfaces {
 
+//! Block template interface
+class BlockTemplate
+{
+public:
+    virtual ~BlockTemplate() = default;
+
+    virtual CBlockHeader getBlockHeader() = 0;
+    virtual CBlock getBlock() = 0;
+
+    virtual std::vector<CAmount> getTxFees() = 0;
+    virtual std::vector<int64_t> getTxSigops() = 0;
+
+    virtual CTransactionRef getCoinbaseTx() = 0;
+    virtual std::vector<unsigned char> getCoinbaseCommitment() = 0;
+    virtual int getWitnessCommitmentIndex() = 0;
+    virtual std::vector<uint256> getCoinbaseMerklePath() = 0;
+
+    /**
+     * Construct and broadcast the block.
+     *
+     * @returns if the block was processed, independent of block validity
+     */
+    virtual bool submitSolution(uint32_t version, uint32_t timestamp, uint32_t nonce, CMutableTransaction coinbase) = 0;
+};
+
 //! Interface giving clients (RPC, Stratum v2 Template Provider in the future)
 //! ability to create block templates.
-
 class Mining
 {
 public:
@@ -41,10 +67,10 @@ public:
      * Construct a new block template
      *
      * @param[in] script_pub_key the coinbase output
-     * @param[in] use_mempool set false to omit mempool transactions
+     * @param[in] options options for creating the block
      * @returns a block template
      */
-    virtual std::unique_ptr<node::CBlockTemplate> createNewBlock(const CScript& script_pub_key, bool use_mempool = true) = 0;
+    virtual std::unique_ptr<BlockTemplate> createNewBlock(const CScript& script_pub_key, const node::BlockCreateOptions& options={}) = 0;
 
     /**
      * Processes new block. A valid new block is automatically relayed to peers.
