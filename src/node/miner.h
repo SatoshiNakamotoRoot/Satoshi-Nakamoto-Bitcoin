@@ -6,6 +6,7 @@
 #ifndef BITCOIN_NODE_MINER_H
 #define BITCOIN_NODE_MINER_H
 
+#include <node/types.h>
 #include <policy/policy.h>
 #include <primitives/block.h>
 #include <txmempool.h>
@@ -26,6 +27,11 @@ class CChainParams;
 class CScript;
 class Chainstate;
 class ChainstateManager;
+
+/** Default for -sv2interval **/
+static constexpr unsigned int DEFAULT_SV2_INTERVAL{30};
+/** Default for -sv2feedelta */
+static constexpr unsigned int DEFAULT_SV2_FEE_DELTA{1000};
 
 namespace Consensus { struct Params; };
 
@@ -153,7 +159,7 @@ private:
     Chainstate& m_chainstate;
 
 public:
-    struct Options {
+    struct Options : BlockCreateOptions {
         // Configuration parameters for the block size
         size_t nBlockMaxWeight{DEFAULT_BLOCK_MAX_WEIGHT};
         CFeeRate blockMinFeeRate{DEFAULT_BLOCK_MIN_TX_FEE};
